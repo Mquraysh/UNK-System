@@ -1,0 +1,569 @@
+<?php
+// delivery/update_status.php - WITH COD PAYMENT CONFIRMATION
+require_once '../../config/database.php';
+session_start();
+
+if (!isset($_SESSION['user_id']) || $_SESSION['role'] != 'delivery') {
+    header("Location: login.php");
+    exit();
+}
+
+$user_id = $_SESSION['user_id'];
+$agent_sql = "SELECT agent_id FROM delivery_agents WHERE user_id = '$user_id'";
+$agent_result = mysqli_query($conn, $agent_sql);
+if (mysqli_num_rows($agent_result) == 0) {
+    header("Location: register.php");
+    exit();
+}
+$agent = mysqli_fetch_assoc($agent_result);
+$agent_id = $agent['agent_id'];
+
+// Helper: send JSON response
+function sendJsonResponse($success, $message, $data = []) {
+    header('Content-Type: application/json');
+    echo json_encode(['success' => $success, 'message' => $message, 'data' => $data]);
+    exit();
+}
+
+// UPDATE AGENT AVAILABILITY (AJAX/JSON) 
+$is_ajax = !empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) == 'xmlhttprequest';
+if ($is_ajax && isset($_POST['is_available'])) {
+    $is_available = (int)$_POST['is_available'];
+    $update_sql = "UPDATE delivery_agents SET is_available = '$is_available' WHERE agent_id = '$agent_id'";
+    if (mysqli_query($conn, $update_sql)) {
+        sendJsonResponse(true, $is_available ? "You are now online" : "You are now offline");
+    } else {
+        sendJsonResponse(false, "Failed to update status");
+    }
+}
+
+// Handle non-AJAX POST for agent availability (fallback)
+if (!$is_ajax && isset($_POST['is_available'])) {
+    $is_available = (int)$_POST['is_available'];
+    mysqli_query($conn, "UPDATE delivery_agents SET is_available = '$is_available' WHERE agent_id = '$agent_id'");
+    $_SESSION['flash_message'] = $is_available ? "You are now online" : "You are now offline";
+    $_SESSION['flash_type'] = "success";
+    header("Location: ../das/dashboard.php");
+    exit();
+}
+
+// ========== UPDATE DELIVERY STATUS (AJAX/JSON) ==========
+if (isset($_GET['id'])) {
+    $delivery_id = (int)$_GET['id'];
+    
+    // Verify delivery belongs to agent
+    $check_sql = "SELECT d.*, o.order_id, o.grand_total, o.delivery_address, 
+                         o.status as order_status, o.payment_method, o.payment_status,
+                         b.business_name
+                  FROM deliveries d 
+                  JOIN orders o ON d.order_id = o.order_id
+                  JOIN businesses b ON o.business_id = b.business_id
+                  WHERE d.delivery_id = '$delivery_id' AND d.agent_id = '$agent_id'";
+    $check_result = mysqli_query($conn, $check_sql);
+    if (mysqli_num_rows($check_result) == 0) {
+        if ($is_ajax) sendJsonResponse(false, "Delivery not found or not assigned to you.");
+        $_SESSION['flash_message'] = "Delivery not found or not assigned to you.";
+        $_SESSION['flash_type'] = "danger";
+        header("Location: ../my-deliveries/my-deliveries.php");
+        exit();
+    }
+    $delivery = mysqli_fetch_assoc($check_result);
+    $current_status = $delivery['status'];
+    $order_id = $delivery['order_id'];
+    $order_current_status = $delivery['order_status'];
+    $payment_method = $delivery['payment_method'] ?? 'cash_on_delivery';
+    $payment_status = $delivery['payment_status'] ?? 'pending';
+    $grand_total = $delivery['grand_total'] ?? 0;
+    
+    // Define allowed progression
+    $status_order = ['assigned', 'picked_up', 'in_transit', 'delivered'];
+    $current_index = array_search($current_status, $status_order);
+    
+    // ========== Check if order is ready for pickup ==========
+    function isOrderReadyForPickup($order_status) {
+        return in_array($order_status, ['ready', 'preparing']);
+    }
+    
+    // ========== Handle AJAX POST (JSON) ==========
+    if ($is_ajax && $_SERVER['REQUEST_METHOD'] == 'POST') {
+        $input = json_decode(file_get_contents('php://input'), true);
+        if (!$input) $input = $_POST;
+        $new_status = isset($input['new_status']) ? $input['new_status'] : '';
+        $payment_confirmed = isset($input['payment_confirmed']) ? (int)$input['payment_confirmed'] : 0;
+        $new_index = array_search($new_status, $status_order);
+        
+        // Validation
+        if (!in_array($new_status, $status_order)) {
+            sendJsonResponse(false, "Invalid status selected.");
+        }
+        if ($new_index === false || $new_index <= $current_index) {
+            sendJsonResponse(false, "You cannot go back to a previous status.");
+        }
+        if ($new_index > $current_index + 1) {
+            sendJsonResponse(false, "Please update step by step. Next allowed status: " . ($status_order[$current_index+1] ?? 'delivered'));
+        }
+        
+        // Special check: if trying to set 'picked_up', ensure order is ready/preparing
+        if ($new_status == 'picked_up' && !isOrderReadyForPickup($order_current_status)) {
+            sendJsonResponse(false, "Cannot pick up order because it is not yet ready. Business must mark order as 'Ready' first. Current order status: " . $order_current_status);
+        }
+        
+        // ============================================
+        // CHECK: If status is 'delivered', confirm payment for COD
+        // ============================================
+        $is_cod = ($payment_method == 'cash_on_delivery');
+        $payment_updated = false;
+        
+        if ($new_status == 'delivered') {
+            // If COD and payment not yet confirmed, require confirmation
+            if ($is_cod && $payment_status != 'paid' && $payment_confirmed != 1) {
+                sendJsonResponse(false, "⚠️ This is a Cash on Delivery order. You must confirm payment before marking as delivered.", [
+                    'requires_payment_confirmation' => true,
+                    'payment_method' => 'cash_on_delivery',
+                    'amount' => $grand_total
+                ]);
+            }
+        }
+        
+        // Start transaction
+        mysqli_begin_transaction($conn);
+        
+        try {
+            // Update deliveries table
+            $update_delivery = "UPDATE deliveries SET status = '$new_status', updated_at = NOW()";
+            if ($new_status == 'delivered') {
+                $update_delivery .= ", delivered_at = NOW()";
+            }
+            mysqli_query($conn, $update_delivery . " WHERE delivery_id = '$delivery_id'");
+            
+            // Map delivery status to order status
+            $order_status_map = [
+                'assigned'   => 'confirmed',
+                'picked_up'  => 'picked_up',
+                'in_transit' => 'in_transit',
+                'delivered'  => 'delivered'
+            ];
+            $new_order_status = $order_status_map[$new_status];
+            mysqli_query($conn, "UPDATE orders SET status = '$new_order_status' WHERE order_id = '$order_id'");
+            
+            // ============================================
+            // AUTOMATIC PAYMENT CONFIRMATION FOR COD
+            // ============================================
+            if ($new_status == 'delivered' && $is_cod) {
+                // Payment is confirmed automatically when delivery is confirmed
+                $payment_update = "UPDATE orders SET 
+                                    payment_status = 'paid', 
+                                    payment_date = NOW() 
+                                  WHERE order_id = '$order_id'";
+                mysqli_query($conn, $payment_update);
+                $payment_updated = true;
+                
+                // Insert payment log
+                $log_sql = "INSERT INTO payment_logs (order_id, amount, payment_method, payment_status, transaction_date) 
+                            VALUES ('$order_id', '$grand_total', 'cash_on_delivery', 'paid', NOW())";
+                mysqli_query($conn, $log_sql);
+            }
+            
+            // Update delivery_updates table
+            $update_note = "Status updated by agent to " . str_replace('_', ' ', $new_status);
+            if ($payment_updated) {
+                $update_note .= " | Payment confirmed (COD)";
+            }
+            mysqli_query($conn, "INSERT INTO delivery_updates (delivery_id, status, notes, update_time) 
+                                  VALUES ('$delivery_id', '$new_status', '$update_note', NOW())");
+            
+            mysqli_commit($conn);
+            
+            $response_message = "Status updated to " . str_replace('_', ' ', ucfirst($new_status));
+            if ($payment_updated) {
+                $response_message .= " ✅ Payment confirmed!";
+            }
+            
+            sendJsonResponse(true, $response_message, [
+                'new_status' => $new_status,
+                'order_status' => $new_order_status,
+                'payment_updated' => $payment_updated,
+                'payment_status' => $payment_updated ? 'paid' : $payment_status
+            ]);
+            
+        } catch (Exception $e) {
+            mysqli_rollback($conn);
+            sendJsonResponse(false, "Failed to update status: " . $e->getMessage());
+        }
+    }
+    
+    // ========== Handle non-AJAX POST (fallback) ==========
+    if ($_SERVER['REQUEST_METHOD'] == 'POST' && !$is_ajax && isset($_POST['new_status'])) {
+        $new_status = $_POST['new_status'];
+        $payment_confirmed = isset($_POST['payment_confirmed']) ? (int)$_POST['payment_confirmed'] : 0;
+        $new_index = array_search($new_status, $status_order);
+        $is_cod = ($payment_method == 'cash_on_delivery');
+        
+        if (!in_array($new_status, $status_order)) {
+            $_SESSION['flash_message'] = "Invalid status selected.";
+            $_SESSION['flash_type'] = "danger";
+            header("Location: update_status.php?id=$delivery_id");
+            exit();
+        }
+        if ($new_index === false || $new_index <= $current_index) {
+            $_SESSION['flash_message'] = "You cannot go back to a previous status.";
+            $_SESSION['flash_type'] = "danger";
+            header("Location: update_status.php?id=$delivery_id");
+            exit();
+        }
+        
+        // Check: if picking up, order must be ready/preparing
+        if ($new_status == 'picked_up' && !isOrderReadyForPickup($order_current_status)) {
+            $_SESSION['flash_message'] = "Cannot pick up order because it is not yet ready. Business must mark order as 'Ready' first.";
+            $_SESSION['flash_type'] = "danger";
+            header("Location: update_status.php?id=$delivery_id");
+            exit();
+        }
+        
+        // ============================================
+        // COD Payment Check
+        // ============================================
+        if ($new_status == 'delivered' && $is_cod && $payment_status != 'paid' && $payment_confirmed != 1) {
+            $_SESSION['flash_message'] = "⚠️ This is a Cash on Delivery order. You must confirm payment before marking as delivered.";
+            $_SESSION['flash_type'] = "warning";
+            $_SESSION['requires_payment_confirmation'] = true;
+            header("Location: update_status.php?id=$delivery_id");
+            exit();
+        }
+        
+        // Start transaction
+        mysqli_begin_transaction($conn);
+        
+        try {
+            // Update deliveries
+            $update_delivery = "UPDATE deliveries SET status = '$new_status', updated_at = NOW()";
+            if ($new_status == 'delivered') $update_delivery .= ", delivered_at = NOW()";
+            mysqli_query($conn, $update_delivery . " WHERE delivery_id = '$delivery_id'");
+            
+            // Update order status
+            $order_status_map = ['assigned'=>'confirmed', 'picked_up'=>'picked_up', 'in_transit'=>'in_transit', 'delivered'=>'delivered'];
+            $new_order_status = $order_status_map[$new_status];
+            mysqli_query($conn, "UPDATE orders SET status = '$new_order_status' WHERE order_id = '$order_id'");
+            
+            // COD Payment confirmation
+            $payment_updated = false;
+            if ($new_status == 'delivered' && $is_cod) {
+                mysqli_query($conn, "UPDATE orders SET payment_status = 'paid', payment_date = NOW() WHERE order_id = '$order_id'");
+                mysqli_query($conn, "INSERT INTO payment_logs (order_id, amount, payment_method, payment_status, transaction_date) 
+                                      VALUES ('$order_id', '$grand_total', 'cash_on_delivery', 'paid', NOW())");
+                $payment_updated = true;
+            }
+            
+            mysqli_query($conn, "INSERT INTO delivery_updates (delivery_id, status, notes, update_time) 
+                                  VALUES ('$delivery_id', '$new_status', 'Status updated by agent', NOW())");
+            
+            mysqli_commit($conn);
+            
+            $_SESSION['flash_message'] = "Delivery status updated to " . str_replace('_', ' ', ucfirst($new_status));
+            if ($payment_updated) {
+                $_SESSION['flash_message'] .= " ✅ Payment confirmed!";
+            }
+            $_SESSION['flash_type'] = "success";
+            header("Location: ../my-deliveries/my-deliveries.php");
+            exit();
+            
+        } catch (Exception $e) {
+            mysqli_rollback($conn);
+            $_SESSION['flash_message'] = "Failed to update status: " . $e->getMessage();
+            $_SESSION['flash_type'] = "danger";
+            header("Location: update_status.php?id=$delivery_id");
+            exit();
+        }
+    }
+    
+    // ========== Display the HTML form (non-AJAX, or initial load) ==========
+    include '../includes/delivery_sidebar.php';
+    ?>
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Update Delivery Status | UNK System</title>
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { font-family: 'Inter', sans-serif; background: #f5f7fa; color: #1e293b; line-height: 1.5; }
+            .delivery-content { margin-left: 280px; padding: 32px 40px; min-height: 100vh; background: #f0f2f5; }
+            .page-header { margin-bottom: 28px; }
+            .page-header h1 { font-size: 28px; font-weight: 800; background: linear-gradient(135deg, #1e293b, #2c3e50); -webkit-background-clip: text; background-clip: text; color: transparent; display: flex; align-items: center; gap: 12px; }
+            .page-header h1 i { color: #e67e22; }
+            .card { background: white; border-radius: 28px; border: 1px solid #eef2f8; overflow: hidden; max-width: 1200px; margin: 0 auto; }
+            .card-header { padding: 24px 28px; background: #fafcff; border-bottom: 1px solid #f0f2f5; }
+            .card-header h3 { font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+            .card-header h3 i { color: #e67e22; }
+            .card-body { padding: 28px; }
+            .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 28px; background: #f8fafc; padding: 20px; border-radius: 20px; }
+            .info-item { display: flex; flex-direction: column; }
+            .info-label { font-size: 12px; color: #64748b; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+            .info-value { font-size: 15px; font-weight: 600; color: #1e293b; }
+            .cod-info { background: #fef9e7; padding: 12px 16px; border-radius: 12px; margin-bottom: 20px; border: 1px solid #f39c12; display: flex; align-items: center; gap: 12px; }
+            .cod-info i { color: #f39c12; font-size: 20px; }
+            .cod-info .amount { font-weight: 700; color: #e67e22; font-size: 16px; }
+            
+            .payment-confirm-box { background: #d1fae5; padding: 16px 20px; border-radius: 12px; margin-bottom: 20px; border: 1px solid #27ae60; display: none; }
+            .payment-confirm-box.show { display: block; }
+            .payment-confirm-box label { font-weight: 600; display: flex; align-items: center; gap: 10px; cursor: pointer; }
+            .payment-confirm-box input[type="checkbox"] { width: 18px; height: 18px; }
+            
+            .form-group { margin-bottom: 24px; }
+            .form-group label { display: block; font-weight: 600; margin-bottom: 8px; font-size: 14px; }
+            .form-control { width: 100%; padding: 12px 16px; border: 1.5px solid #e2e8f0; border-radius: 20px; font-size: 14px; background: white; }
+            .form-control:focus { outline: none; border-color: #e67e22; box-shadow: 0 0 0 3px rgba(230,126,34,0.1); }
+            
+            .btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 24px; border-radius: 40px; font-weight: 600; border: none; cursor: pointer; transition: 0.2s; }
+            .btn-primary { background: linear-gradient(105deg, #e67e22, #d35400); color: white; }
+            .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(230,126,34,0.3); }
+            .btn-secondary { background: #f8fafc; border: 1px solid #e2e8f0; color: #1e293b; text-decoration: none; }
+            .btn-secondary:hover { background: #e67e22; color: white; border-color: #e67e22; }
+            .btn-success { background: #27ae60; color: white; }
+            .btn-success:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(39,174,96,0.3); }
+            
+            .status-badge { display: inline-block; padding: 4px 12px; border-radius: 40px; font-size: 12px; font-weight: 600; }
+            .status-assigned { background: #fef3c7; color: #d97706; }
+            .status-picked_up { background: #dbeafe; color: #2563eb; }
+            .status-in_transit { background: #c7d2fe; color: #4338ca; }
+            .status-delivered { background: #d1fae5; color: #059669; }
+            
+            .payment-badge { display: inline-block; padding: 4px 12px; border-radius: 40px; font-size: 12px; font-weight: 600; }
+            .payment-paid { background: #d1fae5; color: #059669; }
+            .payment-pending { background: #fef3c7; color: #d97706; }
+            
+            .action-buttons { display: flex; gap: 16px; margin-top: 24px; flex-wrap: wrap; }
+            .toast { position: fixed; bottom: 20px; right: 20px; background: #1e293b; color: white; padding: 12px 24px; border-radius: 40px; z-index: 2000; display: none; }
+            
+            .warning-box { background: #fee2e2; padding: 12px 16px; border-radius: 12px; margin-bottom: 20px; color: #991b1b; font-size: 13px; border: 1px solid #fca5a5; }
+            .warning-box i { margin-right: 8px; }
+            
+            @media (max-width: 1024px) { .delivery-content { margin-left: 0; padding: 24px; } }
+            @media (max-width: 640px) { .info-grid { grid-template-columns: 1fr; gap: 12px; } .action-buttons { flex-direction: column; } .btn { justify-content: center; } }
+        </style>
+    </head>
+    <body>
+    <div class="delivery-content">
+        <div class="page-header">
+            <h1><i class="fas fa-truck-fast"></i> Update Delivery Status</h1>
+            <p>Update the progress of your assigned delivery</p>
+        </div>
+        <div class="card">
+            <div class="card-header">
+                <h3><i class="fas fa-info-circle"></i> Delivery Information</h3>
+            </div>
+            <div class="card-body">
+                <!-- Delivery Info Grid -->
+                <div class="info-grid">
+                    <div class="info-item">
+                        <span class="info-label">Delivery ID</span>
+                        <span class="info-value">#<?php echo $delivery_id; ?></span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Order ID</span>
+                        <span class="info-value">#<?php echo $order_id; ?></span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Business</span>
+                        <span class="info-value"><?php echo htmlspecialchars($delivery['business_name']); ?></span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Delivery Address</span>
+                        <span class="info-value"><?php echo htmlspecialchars($delivery['delivery_address']); ?></span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Order Amount</span>
+                        <span class="info-value">TSh <?php echo number_format($grand_total); ?></span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Current Status</span>
+                        <span class="info-value">
+                            <span class="status-badge status-<?php echo $current_status; ?>">
+                                <?php echo str_replace('_', ' ', ucfirst($current_status)); ?>
+                            </span>
+                        </span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Payment Method</span>
+                        <span class="info-value">
+                            <?php if ($payment_method == 'cash_on_delivery'): ?>
+                                <span class="payment-badge payment-<?php echo $payment_status == 'paid' ? 'paid' : 'pending'; ?>">
+                                    <i class="fas fa-money-bill-wave"></i> Cash on Delivery
+                                    <?php if ($payment_status == 'paid'): ?>
+                                        <i class="fas fa-check-circle" style="color: #059669;"></i> Paid
+                                    <?php endif; ?>
+                                </span>
+                            <?php else: ?>
+                                <?php echo ucfirst(str_replace('_', ' ', $payment_method)); ?>
+                            <?php endif; ?>
+                        </span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Payment Status</span>
+                        <span class="info-value">
+                            <span class="payment-badge payment-<?php echo $payment_status == 'paid' ? 'paid' : 'pending'; ?>">
+                                <?php echo $payment_status == 'paid' ? '✅ Paid' : '⏳ Pending'; ?>
+                            </span>
+                        </span>
+                    </div>
+                </div>
+
+                <!-- COD Information -->
+                <?php if ($payment_method == 'cash_on_delivery' && $payment_status != 'paid'): ?>
+                    <div class="cod-info">
+                        <i class="fas fa-money-bill-wave"></i>
+                        <div>
+                            <strong>💰 Cash on Delivery</strong>
+                            <span style="margin-left: 8px; color: #64748b;">Collect</span>
+                            <span class="amount">TSh <?php echo number_format($grand_total); ?></span>
+                            <span style="color: #64748b;">from customer before marking as delivered</span>
+                        </div>
+                    </div>
+                <?php endif; ?>
+
+                <!-- Warning if order not ready -->
+                <?php if ($current_status == 'assigned' && !in_array($order_current_status, ['ready', 'preparing'])): ?>
+                    <div class="warning-box">
+                        <i class="fas fa-exclamation-triangle"></i> 
+                        Note: This order is not yet marked as 'Ready' by the business. You cannot pick it up until the business updates the status.
+                    </div>
+                <?php endif; ?>
+
+                <!-- Payment Confirmation Checkbox (COD only) -->
+                <?php if ($payment_method == 'cash_on_delivery' && $payment_status != 'paid'): ?>
+                    <div class="payment-confirm-box show" id="paymentConfirmBox">
+                        <label>
+                            <input type="checkbox" id="paymentConfirmed" value="1">
+                            <i class="fas fa-check-circle" style="color: #27ae60;"></i>
+                            I confirm that I have collected <strong>TSh <?php echo number_format($grand_total); ?></strong> in cash from the customer
+                        </label>
+                    </div>
+                <?php endif; ?>
+
+                <!-- Status Update Form -->
+                <form id="statusForm" method="POST">
+                    <div class="form-group">
+                        <label>Update Status To:</label>
+                        <select name="new_status" id="newStatus" class="form-control" required>
+                            <?php foreach ($status_order as $status): ?>
+                                <option value="<?php echo $status; ?>" <?php echo $current_status == $status ? 'selected' : ''; ?>>
+                                    <?php echo ucfirst(str_replace('_', ' ', $status)); ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    
+                    <input type="hidden" name="payment_confirmed" id="paymentConfirmedInput" value="0">
+                    
+                    <div class="action-buttons">
+                        <button type="submit" class="btn btn-primary" id="submitBtn">
+                            <i class="fas fa-save"></i> Update Status
+                        </button>
+                        <a href="../my-deliveries/my-deliveries.php" class="btn btn-secondary">
+                            <i class="fas fa-times"></i> Cancel
+                        </a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    <div id="toast" class="toast"></div>
+
+    <script>
+        const form = document.getElementById('statusForm');
+        const toast = document.getElementById('toast');
+        const paymentCheckbox = document.getElementById('paymentConfirmed');
+        const paymentInput = document.getElementById('paymentConfirmedInput');
+        const submitBtn = document.getElementById('submitBtn');
+        const statusSelect = document.getElementById('newStatus');
+        const paymentConfirmBox = document.getElementById('paymentConfirmBox');
+
+        // Show payment confirmation when selecting 'delivered' for COD
+        if (paymentConfirmBox) {
+            statusSelect.addEventListener('change', function() {
+                if (this.value === 'delivered') {
+                    paymentConfirmBox.style.display = 'block';
+                } else {
+                    paymentConfirmBox.style.display = 'none';
+                }
+            });
+        }
+
+        // Update hidden input when checkbox changes
+        if (paymentCheckbox) {
+            paymentCheckbox.addEventListener('change', function() {
+                paymentInput.value = this.checked ? '1' : '0';
+            });
+        }
+
+        function showToast(message, isError = false) {
+            toast.textContent = message;
+            toast.style.backgroundColor = isError ? '#dc2626' : '#10b981';
+            toast.style.display = 'block';
+            setTimeout(() => { toast.style.display = 'none'; }, 4000);
+        }
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const newStatus = document.getElementById('newStatus').value;
+            const paymentConfirmed = document.getElementById('paymentConfirmed')?.checked ? 1 : 0;
+            
+            // Check if COD and trying to deliver without payment confirmation
+            <?php if ($payment_method == 'cash_on_delivery' && $payment_status != 'paid'): ?>
+            if (newStatus === 'delivered' && paymentConfirmed !== 1) {
+                showToast('⚠️ Please confirm that you have collected cash payment before marking as delivered.', true);
+                return;
+            }
+            <?php endif; ?>
+
+            try {
+                const response = await fetch(window.location.href, {
+                    method: 'POST',
+                    headers: { 
+                        'Content-Type': 'application/json', 
+                        'X-Requested-With': 'XMLHttpRequest' 
+                    },
+                    body: JSON.stringify({ 
+                        new_status: newStatus,
+                        payment_confirmed: paymentConfirmed
+                    })
+                });
+                const result = await response.json();
+                
+                if (result.success) {
+                    showToast(result.message);
+                    setTimeout(() => { 
+                        window.location.href = '../my-deliveries/my-deliveries.php'; 
+                    }, 1500);
+                } else {
+                    showToast(result.message, true);
+                }
+            } catch (err) {
+                showToast('Network error. Please try again.', true);
+            }
+        });
+    </script>
+    </body>
+    </html>
+    <?php
+    exit();
+}
+
+header("Location: das/dashboard.php");
+exit();
+?>
+
+-- Create payment_logs table for tracking COD payments
+CREATE TABLE IF NOT EXISTS payment_logs (
+    log_id INT AUTO_INCREMENT PRIMARY KEY,
+    order_id INT NOT NULL,
+    amount DECIMAL(10,2) NOT NULL,
+    payment_method VARCHAR(50) NOT NULL,
+    payment_status VARCHAR(20) NOT NULL,
+    transaction_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (order_id) REFERENCES orders(order_id) ON DELETE CASCADE,
+    INDEX idx_order_id (order_id)
+);

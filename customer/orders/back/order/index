@@ -1,0 +1,447 @@
+<?php
+// customer/orders/index.php 
+require_once '../../config/database.php';
+session_start();
+
+if (!isset($_SESSION['user_id']) || $_SESSION['role'] != 'customer') {
+    header("Location: ../login.php");
+    exit();
+}
+
+$user_id = $_SESSION['user_id'];
+
+// Get customer_id using prepared statement
+$stmt = mysqli_prepare($conn, "SELECT customer_id FROM customers WHERE user_id = ?");
+mysqli_stmt_bind_param($stmt, 'i', $user_id);
+mysqli_stmt_execute($stmt);
+$customer = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+mysqli_stmt_close($stmt);
+$customer_id = $customer['customer_id'];
+
+// Handle AJAX request (JSON response)
+$is_ajax = !empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) == 'xmlhttprequest';
+if ($is_ajax && isset($_GET['ajax'])) {
+    header('Content-Type: application/json');
+    
+    $status_filter = isset($_GET['status']) ? $_GET['status'] : '';
+    
+    // Build query for orders with delivery info
+    $sql = "SELECT o.*, b.business_name,
+                   d.delivery_id, d.status as delivery_status, d.rating as delivery_rating,
+                   da.agent_id, da.first_name as agent_first_name, da.last_name as agent_last_name
+            FROM orders o
+            JOIN businesses b ON o.business_id = b.business_id
+            LEFT JOIN deliveries d ON o.order_id = d.order_id
+            LEFT JOIN delivery_agents da ON d.agent_id = da.agent_id
+            WHERE o.customer_id = ?";
+    $params = [$customer_id];
+    $types = "i";
+    
+    if (!empty($status_filter)) {
+        $sql .= " AND o.status = ?";
+        $params[] = $status_filter;
+        $types .= "s";
+    }
+    $sql .= " ORDER BY o.order_date DESC";
+    
+    $stmt = mysqli_prepare($conn, $sql);
+    mysqli_stmt_bind_param($stmt, $types, ...$params);
+    mysqli_stmt_execute($stmt);
+    $orders_result = mysqli_stmt_get_result($stmt);
+    
+    $orders = [];
+    while ($order = mysqli_fetch_assoc($orders_result)) {
+        // Get item count
+        $item_sql = "SELECT SUM(quantity) as total_items FROM order_items WHERE order_id = ?";
+        $item_stmt = mysqli_prepare($conn, $item_sql);
+        mysqli_stmt_bind_param($item_stmt, 'i', $order['order_id']);
+        mysqli_stmt_execute($item_stmt);
+        $item_data = mysqli_fetch_assoc(mysqli_stmt_get_result($item_stmt));
+        mysqli_stmt_close($item_stmt);
+        $order['item_count'] = (int)($item_data['total_items'] ?? 0);
+        
+        // Check if delivery has been rated
+        $order['is_rated'] = false;
+        if (!empty($order['delivery_id'])) {
+            $check_rated = mysqli_query($conn, "SELECT rating_id FROM delivery_ratings WHERE delivery_id = {$order['delivery_id']} AND customer_id = $customer_id");
+            $order['is_rated'] = mysqli_num_rows($check_rated) > 0;
+        }
+        
+        $orders[] = $order;
+    }
+    mysqli_stmt_close($stmt);
+    
+    // Get statistics for all statuses
+    $stats_sql = "SELECT status, COUNT(*) as cnt FROM orders WHERE customer_id = ? GROUP BY status";
+    $stats_stmt = mysqli_prepare($conn, $stats_sql);
+    mysqli_stmt_bind_param($stats_stmt, 'i', $customer_id);
+    mysqli_stmt_execute($stats_stmt);
+    $stats_res = mysqli_stmt_get_result($stats_stmt);
+    $stats = [
+        'total' => 0,
+        'pending' => 0, 'accepted' => 0, 'confirmed' => 0,
+        'preparing' => 0, 'ready' => 0, 'picked_up' => 0,
+        'in_transit' => 0, 'delivered' => 0, 'cancelled' => 0
+    ];
+    while ($row = mysqli_fetch_assoc($stats_res)) {
+        $status = $row['status'];
+        if (isset($stats[$status])) $stats[$status] = (int)$row['cnt'];
+        $stats['total'] += (int)$row['cnt'];
+    }
+    mysqli_stmt_close($stats_stmt);
+    
+    echo json_encode(['orders' => $orders, 'stats' => $stats]);
+    exit();
+}
+
+// Flash message from session
+$flash_message = $_SESSION['flash_message'] ?? '';
+$flash_type = $_SESSION['flash_type'] ?? 'success';
+unset($_SESSION['flash_message'], $_SESSION['flash_type']);
+
+include '../includes/customer_sidebar.php';
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>My Orders - UNK System</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', sans-serif; background: #f5f7fb; color: #1f2937; }
+        .customer-content { margin-left: 280px; padding: 30px 35px; min-height: 100vh; transition: all 0.3s; }
+        .page-header { margin-bottom: 25px; }
+        .page-header h1 { font-size: 28px; color: #1e293b; display: flex; align-items: center; gap: 12px; }
+        .page-header h1 i { color: #e67e22; }
+        
+        .alert { padding: 12px 16px; border-radius: 12px; margin-bottom: 20px; display: flex; align-items: center; gap: 10px; }
+        .alert-success { background: #d1fae5; color: #065f46; border-left: 4px solid #10b981; }
+        .alert-danger { background: #fee2e2; color: #991b1b; border-left: 4px solid #ef4444; }
+        
+        /* Statistics Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 16px;
+            margin-bottom: 32px;
+        }
+        .stat-card {
+            background: white;
+            border-radius: 16px;
+            padding: 16px 12px;
+            text-align: center;
+            text-decoration: none;
+            transition: all 0.2s;
+            border: 1px solid #e2e8f0;
+            cursor: pointer;
+        }
+        .stat-card:hover { transform: translateY(-3px); box-shadow: 0 8px 20px rgba(0,0,0,0.08); border-color: #e67e22; }
+        .stat-card h3 { font-size: 24px; font-weight: 700; color: #e67e22; margin-bottom: 4px; }
+        .stat-card p { color: #64748b; font-size: 12px; margin: 0; white-space: nowrap; }
+        .stat-card.active { border-color: #e67e22; background: #fff5eb; }
+        
+        /* Quick Filters Row */
+        .quick-filters {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 20px;
+        }
+        .quick-filter {
+            padding: 6px 16px;
+            background: white;
+            border-radius: 30px;
+            text-decoration: none;
+            color: #475569;
+            font-size: 13px;
+            transition: 0.2s;
+            border: 1px solid #e2e8f0;
+            cursor: pointer;
+        }
+        .quick-filter:hover, .quick-filter.active {
+            background: #e67e22;
+            color: white;
+            border-color: #e67e22;
+        }
+        
+        .card { background: white; border-radius: 20px; border: 1px solid #e2e8f0; overflow: hidden; }
+        .card-header { padding: 18px 24px; background: #f8fafc; border-bottom: 1px solid #e2e8f0; }
+        .card-header h3 { font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+        .table-container { overflow-x: auto; }
+        .data-table { width: 100%; border-collapse: collapse; }
+        .data-table th { padding: 14px 16px; text-align: left; font-weight: 600; color: #64748b; font-size: 12px; border-bottom: 1px solid #eef2f6; background: #f8fafc; }
+        .data-table td { padding: 14px 16px; border-bottom: 1px solid #eef2f6; font-size: 13px; vertical-align: middle; }
+        .data-table tr:hover td { background: #fff5eb; }
+        .order-id { font-weight: 700; color: #e67e22; font-family: monospace; }
+        .status-badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+        .status-pending { background: #fef3c7; color: #d97706; }
+        .status-accepted, .status-confirmed, .status-preparing, .status-ready, .status-picked_up, .status-in_transit { background: #dbeafe; color: #2563eb; }
+        .status-delivered { background: #d1fae5; color: #059669; }
+        .status-cancelled { background: #fee2e2; color: #dc2626; }
+        
+        .btn-sm { padding: 6px 12px; border-radius: 8px; text-decoration: none; font-size: 12px; display: inline-flex; align-items: center; gap: 6px; margin: 0 3px; transition: 0.2s; border: none; cursor: pointer; }
+        .btn-view { background: #3498db; color: white; }
+        .btn-view:hover { background: #2980b9; }
+        .btn-track { background: #27ae60; color: white; }
+        .btn-track:hover { background: #219a52; }
+        .btn-cancel { background: #e74c3c; color: white; }
+        .btn-cancel:hover { background: #c0392b; }
+        .btn-delete { background: #7f8c8d; color: white; }
+        .btn-delete:hover { background: #6c757d; }
+        .btn-rate { background: #f59e0b; color: white; }
+        .btn-rate:hover { background: #d97706; }
+        .btn-rated { background: #10b981; color: white; cursor: default; }
+        .btn-rated:hover { background: #10b981; }
+        
+        .empty-state { text-align: center; padding: 60px; color: #94a3b8; }
+        .empty-state i { font-size: 64px; margin-bottom: 15px; opacity: 0.5; }
+        .toast-message { position: fixed; bottom: 30px; right: 30px; background: #1e293b; color: white; padding: 12px 24px; border-radius: 50px; z-index: 2000; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
+        .action-buttons { display: flex; flex-wrap: wrap; gap: 4px; }
+        
+        @media (max-width: 1024px) { .customer-content { margin-left: 0; padding: 20px; } }
+        @media (max-width: 768px) { 
+            .stats-grid { grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); }
+            .stat-card h3 { font-size: 20px; }
+            .stat-card p { font-size: 10px; white-space: normal; }
+            .data-table th, .data-table td { padding: 10px 12px; font-size: 12px; }
+            .action-buttons { flex-direction: column; gap: 4px; }
+            .btn-sm { justify-content: center; }
+        }
+    </style>
+</head>
+<body>
+<div class="customer-content">
+    <div class="page-header">
+        <h1><i class="fas fa-box"></i> My Orders</h1>
+    </div>
+    
+    <div id="flashContainer">
+        <?php if(!empty($flash_message)): ?>
+        <div class="alert alert-<?php echo $flash_type; ?>">
+            <i class="fas fa-<?php echo $flash_type == 'success' ? 'check-circle' : 'exclamation-circle'; ?>"></i>
+            <span><?php echo htmlspecialchars($flash_message); ?></span>
+        </div>
+        <?php endif; ?>
+    </div>
+    
+    <!-- Statistics Cards -->
+    <div class="stats-grid" id="statsGrid">
+        <div class="stat-card" data-status=""><h3 id="statTotal">0</h3><p>All Orders</p></div>
+        <div class="stat-card" data-status="pending"><h3 id="statPending">0</h3><p>Pending</p></div>
+        <div class="stat-card" data-status="accepted"><h3 id="statAccepted">0</h3><p>Accepted</p></div>
+        <div class="stat-card" data-status="confirmed"><h3 id="statConfirmed">0</h3><p>Confirmed</p></div>
+        <div class="stat-card" data-status="preparing"><h3 id="statPreparing">0</h3><p>Preparing</p></div>
+        <div class="stat-card" data-status="ready"><h3 id="statReady">0</h3><p>Ready</p></div>
+        <div class="stat-card" data-status="picked_up"><h3 id="statPickedUp">0</h3><p>Picked Up</p></div>
+        <div class="stat-card" data-status="in_transit"><h3 id="statInTransit">0</h3><p>In Transit</p></div>
+        <div class="stat-card" data-status="delivered"><h3 id="statDelivered">0</h3><p>Delivered</p></div>
+        <div class="stat-card" data-status="cancelled"><h3 id="statCancelled">0</h3><p>Cancelled</p></div>
+    </div>
+    
+    <!-- Quick Filter Buttons -->
+    <div class="quick-filters" id="filters">
+        <button data-status="" class="quick-filter active">All Orders</button>
+        <button data-status="pending" class="quick-filter">Pending</button>
+        <button data-status="accepted" class="quick-filter">Accepted</button>
+        <button data-status="confirmed" class="quick-filter">Confirmed</button>
+        <button data-status="preparing" class="quick-filter">Preparing</button>
+        <button data-status="ready" class="quick-filter">Ready</button>
+        <button data-status="picked_up" class="quick-filter">Picked Up</button>
+        <button data-status="in_transit" class="quick-filter">In Transit</button>
+        <button data-status="delivered" class="quick-filter">Delivered</button>
+        <button data-status="cancelled" class="quick-filter">Cancelled</button>
+    </div>
+    
+    <!-- Orders Table -->
+    <div class="card">
+        <div class="card-header">
+            <h3><i class="fas fa-list"></i> Order History</h3>
+        </div>
+        <div class="table-container">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Order ID</th>
+                        <th>Business</th>
+                        <th>Date</th>
+                        <th>Items</th>
+                        <th>Total</th>
+                        <th>Status</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="ordersTableBody">
+                    <tr><td colspan="7" class="empty-state"><i class="fas fa-spinner fa-spin"></i> Loading orders...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div id="toastMessage" class="toast-message"></div>
+
+<script>
+let currentStatus = '';
+
+function showToast(message, isError = false) {
+    const toast = document.getElementById('toastMessage');
+    toast.textContent = message;
+    toast.style.backgroundColor = isError ? '#dc2626' : '#10b981';
+    toast.style.opacity = '1';
+    setTimeout(() => { toast.style.opacity = '0'; }, 3000);
+}
+
+async function loadOrders(status = '') {
+    try {
+        const url = window.location.pathname + '?ajax=1' + (status ? '&status=' + encodeURIComponent(status) : '');
+        const response = await fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+        const data = await response.json();
+        
+        // Update statistics cards
+        document.getElementById('statTotal').innerText = data.stats.total;
+        document.getElementById('statPending').innerText = data.stats.pending;
+        document.getElementById('statAccepted').innerText = data.stats.accepted;
+        document.getElementById('statConfirmed').innerText = data.stats.confirmed;
+        document.getElementById('statPreparing').innerText = data.stats.preparing;
+        document.getElementById('statReady').innerText = data.stats.ready;
+        document.getElementById('statPickedUp').innerText = data.stats.picked_up;
+        document.getElementById('statInTransit').innerText = data.stats.in_transit;
+        document.getElementById('statDelivered').innerText = data.stats.delivered;
+        document.getElementById('statCancelled').innerText = data.stats.cancelled;
+        
+        // Highlight active stat card
+        document.querySelectorAll('.stat-card').forEach(card => {
+            if (card.getAttribute('data-status') === status) {
+                card.classList.add('active');
+            } else {
+                card.classList.remove('active');
+            }
+        });
+        
+        // Build table rows
+        const tbody = document.getElementById('ordersTableBody');
+        if (data.orders.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7" class="empty-state"><i class="fas fa-inbox"></i><p>No orders found</p><a href="../products/index.php" style="color: #e67e22;">Start Shopping →</a></td></tr>';
+            return;
+        }
+        
+        let html = '';
+        for (const order of data.orders) {
+            let statusClass = order.status;
+            let statusIcon = 'clock';
+            if (order.status === 'delivered') statusIcon = 'check-circle';
+            else if (order.status === 'cancelled') statusIcon = 'times-circle';
+            else if (order.status === 'accepted') statusIcon = 'check-circle';
+            else if (order.status === 'confirmed') statusIcon = 'check-double';
+            else if (order.status === 'preparing') statusIcon = 'cogs';
+            else if (order.status === 'ready') statusIcon = 'box-open';
+            else if (order.status === 'picked_up') statusIcon = 'truck';
+            else if (order.status === 'in_transit') statusIcon = 'truck';
+            
+            let displayStatus = order.status.replace('_', ' ');
+            displayStatus = displayStatus.charAt(0).toUpperCase() + displayStatus.slice(1);
+            
+            // Build action buttons
+            let actionsHtml = `<a href="details.php?id=${order.order_id}" class="btn-sm btn-view"><i class="fas fa-eye"></i> View</a>`;
+            
+            // Track button - for in_progress deliveries
+            if (order.status !== 'pending' && order.status !== 'delivered' && order.status !== 'cancelled') {
+                actionsHtml += `<a href="track.php?id=${order.order_id}" class="btn-sm btn-track"><i class="fas fa-truck"></i> Track</a>`;
+            }
+            
+       
+            // RATE DELIVERY BUTTON - NEW
+            if (order.status === 'delivered' && order.delivery_id) {
+                if (!order.is_rated) {
+                    actionsHtml += `<a href="../rate/rate-delivery.php?id=${order.delivery_id}" class="btn-sm btn-rate"><i class="fas fa-star"></i> Rate</a>`;
+                } else {
+                    actionsHtml += `<span class="btn-sm btn-rated"><i class="fas fa-check-circle"></i> Rated</span>`;
+                }
+            }
+            
+            // Cancel button - only for pending
+            if (order.status === 'pending') {
+                actionsHtml += `<a href="cancel.php?id=${order.order_id}" class="btn-sm btn-cancel" onclick="return confirm('Cancel this order?')"><i class="fas fa-times"></i> Cancel</a>`;
+            }
+            
+            // Invoice button - only for delivered
+            if (order.status === 'delivered') {
+                actionsHtml += `<a href="invoice.php?id=${order.order_id}" class="btn-sm btn-view" target="_blank"><i class="fas fa-print"></i> Invoice</a>`;
+            }
+            
+            // Delete button - for pending or cancelled
+            if (order.status === 'pending' || order.status === 'cancelled') {
+                actionsHtml += `<a href="delete.php?id=${order.order_id}" class="btn-sm btn-delete" onclick="return confirm('⚠️ Permanently delete this order? This action cannot be undone.')"><i class="fas fa-trash-alt"></i> Delete</a>`;
+            }
+            
+            html += `<tr>
+                <td class="order-id">${order.order_id}</td>
+                <td>${escapeHtml(order.business_name)}</td>
+                <td>${new Date(order.order_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
+                <td>${order.item_count} items</td>
+                <td><strong>TSh ${formatNumber(order.grand_total)}</strong></td>
+                <td><span class="status-badge status-${statusClass}"><i class="fas fa-${statusIcon}"></i> ${displayStatus}</span></td>
+                <td class="action-buttons">${actionsHtml}</td>
+            </tr>`;
+        }
+        tbody.innerHTML = html;
+    } catch (err) {
+        console.error(err);
+        document.getElementById('ordersTableBody').innerHTML = '<tr><td colspan="7" class="empty-state"><i class="fas fa-exclamation-triangle"></i><p>Error loading orders. Please refresh.</p></td></tr>';
+        showToast('Failed to load orders', true);
+    }
+}
+
+function formatNumber(num) {
+    return new Intl.NumberFormat().format(num);
+}
+
+function escapeHtml(str) {
+    if (!str) return '';
+    return str.replace(/[&<>]/g, function(m) {
+        if (m === '&') return '&amp;';
+        if (m === '<') return '&lt;';
+        if (m === '>') return '&gt;';
+        return m;
+    });
+}
+
+// Filter buttons
+document.querySelectorAll('#filters .quick-filter').forEach(btn => {
+    btn.addEventListener('click', function() {
+        document.querySelectorAll('#filters .quick-filter').forEach(b => b.classList.remove('active'));
+        this.classList.add('active');
+        currentStatus = this.getAttribute('data-status');
+        loadOrders(currentStatus);
+    });
+});
+
+// Stat cards clickable
+document.querySelectorAll('.stat-card').forEach(card => {
+    card.addEventListener('click', function() {
+        const status = this.getAttribute('data-status');
+        document.querySelectorAll('#filters .quick-filter').forEach(btn => {
+            if (btn.getAttribute('data-status') === status) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+        });
+        currentStatus = status;
+        loadOrders(currentStatus);
+    });
+});
+
+// Initial load
+loadOrders();
+
+// Auto-remove flash message
+const flashDiv = document.querySelector('#flashContainer .alert');
+if (flashDiv) {
+    setTimeout(() => { flashDiv.style.display = 'none'; }, 3000);
+}
+</script>
+</body>
+</html> 

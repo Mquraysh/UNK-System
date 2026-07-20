@@ -1,0 +1,762 @@
+<?php
+require_once '../../config/database.php';
+session_start();
+
+if (!isset($_SESSION['user_id']) || $_SESSION['role'] != 'delivery') {
+    header("Location: ../login.php");
+    exit();
+}
+
+$user_id = $_SESSION['user_id'];
+
+$agent_sql = "SELECT * FROM delivery_agents WHERE user_id='$user_id'";
+$agent_result = mysqli_query($conn, $agent_sql);
+$agent = mysqli_fetch_assoc($agent_result);
+
+if (!$agent) {
+    header("Location: ../register.php");
+    exit();
+}
+
+$agent_id = $agent['agent_id'];
+
+if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
+    $_SESSION['flash_message'] = "Invalid delivery.";
+    $_SESSION['flash_type'] = "danger";
+    header("Location: ../my-deliveries/my-deliveries.php");
+    exit();
+}
+
+$delivery_id = (int)$_GET['id'];
+
+$sql = "SELECT
+            d.*,
+            o.order_id,
+            o.delivery_address,
+            o.contact_phone,
+            o.order_date,
+            o.delivery_fee,
+            o.grand_total,
+            b.business_name,
+            b.location AS pickup_location
+        FROM deliveries d
+        JOIN orders o ON d.order_id=o.order_id
+        JOIN businesses b ON o.business_id=b.business_id
+        WHERE d.delivery_id='$delivery_id'
+        AND d.agent_id='$agent_id'
+        LIMIT 1";
+
+$result = mysqli_query($conn, $sql);
+
+if(mysqli_num_rows($result)==0){
+    $_SESSION['flash_message']="Delivery not found.";
+    $_SESSION['flash_type']="danger";
+    header("Location: ../my-deliveries/my-deliveries.php");
+    exit();
+}
+
+$delivery = mysqli_fetch_assoc($result);
+
+$currentStatus = $delivery['status'];
+
+function completed($step,$current){
+
+    $order=[
+        'assigned'=>1,
+        'picked_up'=>2,
+        'in_transit'=>3,
+        'delivered'=>4
+    ];
+
+    if($order[$step] < $order[$current]){
+        return 'completed';
+    }
+
+    if($order[$step] == $order[$current]){
+        return 'active';
+    }
+
+    return '';
+}
+
+include '../includes/delivery_sidebar.php';
+?>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Track Delivery | UNK System</title>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+<style>
+
+*{
+margin:0;
+padding:0;
+box-sizing:border-box;
+}
+
+body{
+font-family:'Inter',sans-serif;
+background:#f5f7fb;
+color:#1f2937;
+}
+
+.delivery-content{
+margin-left:280px;
+padding:30px;
+min-height:100vh;
+}
+
+@media(max-width:1024px){
+
+.delivery-content{
+margin-left:0;
+padding:15px;
+}
+
+}
+
+.page-header{
+display:flex;
+justify-content:space-between;
+align-items:center;
+margin-bottom:25px;
+flex-wrap:wrap;
+gap:15px;
+}
+
+.page-header h1{
+font-size:30px;
+font-weight:800;
+color:#0f172a;
+display:flex;
+align-items:center;
+gap:12px;
+}
+
+.page-header i{
+color:#e67e22;
+}
+
+.page-header p{
+margin-top:5px;
+color:#64748b;
+font-size:14px;
+}
+
+.card{
+
+background:#fff;
+border-radius:16px;
+padding:25px;
+margin-bottom:25px;
+border:1px solid #e2e8f0;
+box-shadow:0 2px 8px rgba(0,0,0,.05);
+
+}
+
+.card-title{
+
+display:flex;
+align-items:center;
+gap:10px;
+font-size:18px;
+font-weight:700;
+margin-bottom:20px;
+color:#1e293b;
+
+}
+
+.card-title i{
+color:#e67e22;
+}
+
+.info-grid{
+
+display:grid;
+grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
+gap:20px;
+
+}
+
+.info-box{
+
+background:#f8fafc;
+padding:18px;
+border-radius:12px;
+border:1px solid #e2e8f0;
+
+}
+
+.info-label{
+
+font-size:12px;
+font-weight:700;
+text-transform:uppercase;
+color:#64748b;
+margin-bottom:8px;
+
+}
+
+.info-value{
+
+font-size:15px;
+font-weight:600;
+color:#1e293b;
+word-break:break-word;
+
+}
+
+.status{
+
+display:inline-flex;
+align-items:center;
+gap:8px;
+padding:8px 16px;
+border-radius:30px;
+font-size:13px;
+font-weight:700;
+
+}
+
+.assigned{
+background:#dbeafe;
+color:#1d4ed8;
+}
+
+.picked_up{
+background:#ede9fe;
+color:#6d28d9;
+}
+
+.in_transit{
+background:#fce7f3;
+color:#be185d;
+}
+
+.delivered{
+background:#d1fae5;
+color:#047857;
+}
+
+.progress{
+
+display:flex;
+justify-content:space-between;
+align-items:center;
+margin-top:30px;
+position:relative;
+flex-wrap:nowrap;
+
+}
+
+.progress::before{
+
+content:'';
+position:absolute;
+left:10%;
+right:10%;
+top:24px;
+height:4px;
+background:#dbe4ef;
+z-index:1;
+
+}
+
+.step{
+
+position:relative;
+z-index:2;
+text-align:center;
+width:25%;
+
+}
+
+.circle{
+
+width:50px;
+height:50px;
+border-radius:50%;
+background:#dbe4ef;
+display:flex;
+align-items:center;
+justify-content:center;
+margin:auto;
+font-size:20px;
+color:#64748b;
+transition:.3s;
+
+}
+
+.step.completed .circle{
+
+background:#10b981;
+color:#fff;
+
+}
+
+.step.active .circle{
+
+background:#e67e22;
+color:#fff;
+box-shadow:0 0 0 6px rgba(230,126,34,.15);
+
+}
+
+.step-title{
+
+margin-top:12px;
+font-size:13px;
+font-weight:700;
+
+}
+
+@media(max-width:768px){
+
+.progress{
+
+flex-direction:column;
+gap:30px;
+
+}
+
+.progress::before{
+
+display:none;
+
+}
+
+.step{
+
+width:100%;
+
+}
+
+}
+
+.btn{
+
+display:inline-flex;
+align-items:center;
+gap:8px;
+padding:12px 22px;
+border-radius:8px;
+text-decoration:none;
+font-weight:700;
+transition:.3s;
+
+}
+
+.btn-back{
+
+background:#64748b;
+color:#fff;
+
+}
+
+.btn-update{
+
+background:#e67e22;
+color:#fff;
+
+}
+
+.btn:hover{
+
+transform:translateY(-2px);
+
+}
+
+.actions{
+
+display:flex;
+gap:12px;
+margin-top:30px;
+flex-wrap:wrap;
+
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="delivery-content">
+
+<div class="page-header">
+
+<div>
+
+<h1>
+<i class="fas fa-map-marked-alt"></i>
+Track Delivery
+</h1>
+
+<p>Track your delivery progress in real time</p>
+
+</div>
+
+</div>
+<!-- Delivery Information -->
+<div class="card">
+
+    <div class="card-title">
+        <i class="fas fa-box"></i>
+        Delivery Information
+    </div>
+
+    <div class="info-grid">
+
+        <div class="info-box">
+            <div class="info-label">Delivery ID</div>
+            <div class="info-value">
+                #<?php echo $delivery['delivery_id']; ?>
+            </div>
+        </div>
+
+        <div class="info-box">
+            <div class="info-label">Order ID</div>
+            <div class="info-value">
+                #<?php echo $delivery['order_id']; ?>
+            </div>
+        </div>
+
+        <div class="info-box">
+            <div class="info-label">Business</div>
+            <div class="info-value">
+                <?php echo htmlspecialchars($delivery['business_name']); ?>
+            </div>
+        </div>
+
+        <div class="info-box">
+            <div class="info-label">Delivery Fee</div>
+            <div class="info-value">
+                TSh <?php echo number_format($delivery['delivery_fee']); ?>
+            </div>
+        </div>
+
+        <div class="info-box">
+            <div class="info-label">Customer Phone</div>
+            <div class="info-value">
+                <?php echo htmlspecialchars($delivery['contact_phone']); ?>
+            </div>
+        </div>
+
+        <div class="info-box">
+            <div class="info-label">Order Amount</div>
+            <div class="info-value">
+                TSh <?php echo number_format($delivery['grand_total']); ?>
+            </div>
+        </div>
+
+        <div class="info-box" style="grid-column: span 2;">
+            <div class="info-label">Pickup Location</div>
+            <div class="info-value">
+                <i class="fas fa-store"></i>
+                <?php echo htmlspecialchars($delivery['pickup_location']); ?>
+            </div>
+        </div>
+
+        <div class="info-box" style="grid-column: span 2;">
+            <div class="info-label">Delivery Address</div>
+            <div class="info-value">
+                <i class="fas fa-map-marker-alt"></i>
+                <?php echo htmlspecialchars($delivery['delivery_address']); ?>
+            </div>
+        </div>
+
+        <div class="info-box">
+            <div class="info-label">Order Date</div>
+            <div class="info-value">
+                <?php echo date("d M Y H:i", strtotime($delivery['order_date'])); ?>
+            </div>
+        </div>
+
+        <div class="info-box">
+            <div class="info-label">Current Status</div>
+            <div class="info-value">
+
+                <span class="status <?php echo $delivery['status']; ?>">
+
+                    <?php
+                    switch($delivery['status']){
+
+                        case "assigned":
+                            echo "<i class='fas fa-user-check'></i> Assigned";
+                            break;
+
+                        case "picked_up":
+                            echo "<i class='fas fa-box-open'></i> Picked Up";
+                            break;
+
+                        case "in_transit":
+                            echo "<i class='fas fa-truck'></i> In Transit";
+                            break;
+
+                        case "delivered":
+                            echo "<i class='fas fa-check-circle'></i> Delivered";
+                            break;
+
+                        default:
+                            echo ucfirst($delivery['status']);
+                    }
+                    ?>
+
+                </span>
+
+            </div>
+        </div>
+
+    </div>
+
+</div>
+
+
+<!-- Delivery Progress -->
+
+<div class="card">
+
+    <div class="card-title">
+        <i class="fas fa-route"></i>
+        Delivery Progress
+    </div>
+
+    <div class="progress">
+
+        <div class="step <?php echo completed('assigned',$currentStatus); ?>">
+
+            <div class="circle">
+                <i class="fas fa-user-check"></i>
+            </div>
+
+            <div class="step-title">
+                Assigned
+            </div>
+
+        </div>
+
+        <div class="step <?php echo completed('picked_up',$currentStatus); ?>">
+
+            <div class="circle">
+                <i class="fas fa-box-open"></i>
+            </div>
+
+            <div class="step-title">
+                Picked Up
+            </div>
+
+        </div>
+
+        <div class="step <?php echo completed('in_transit',$currentStatus); ?>">
+
+            <div class="circle">
+                <i class="fas fa-truck"></i>
+            </div>
+
+            <div class="step-title">
+                In Transit
+            </div>
+
+        </div>
+
+        <div class="step <?php echo completed('delivered',$currentStatus); ?>">
+
+            <div class="circle">
+                <i class="fas fa-check-circle"></i>
+            </div>
+
+            <div class="step-title">
+                Delivered
+            </div>
+
+        </div>
+
+    </div>
+
+</div>
+<!-- Delivery Timeline -->
+<div class="card">
+
+    <div class="card-title">
+        <i class="fas fa-history"></i>
+        Delivery Timeline
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:18px;">
+
+        <?php
+
+        $timeline = [
+            'assigned'   => ['Assigned to Delivery Agent','fas fa-user-check'],
+            'picked_up'  => ['Parcel Picked Up','fas fa-box-open'],
+            'in_transit' => ['On The Way','fas fa-truck'],
+            'delivered'  => ['Successfully Delivered','fas fa-check-circle']
+        ];
+
+        foreach($timeline as $key=>$item):
+
+            $class = completed($key,$currentStatus);
+
+        ?>
+
+        <div style="display:flex;align-items:center;gap:15px;">
+
+            <div style="
+                width:45px;
+                height:45px;
+                border-radius:50%;
+                display:flex;
+                align-items:center;
+                justify-content:center;
+                background:
+                <?php
+                    if($class=='completed') echo '#10b981';
+                    elseif($class=='active') echo '#e67e22';
+                    else echo '#e2e8f0';
+                ?>;
+                color:
+                <?php
+                    echo ($class=='') ? '#64748b' : '#fff';
+                ?>;
+            ">
+
+                <i class="<?php echo $item[1]; ?>"></i>
+
+            </div>
+
+            <div>
+
+                <div style="font-weight:700;font-size:15px;">
+                    <?php echo $item[0]; ?>
+                </div>
+
+                <small style="color:#64748b;">
+
+                    <?php
+
+                    if($class=='completed'){
+                        echo "Completed";
+                    }
+                    elseif($class=='active'){
+                        echo "Current Status";
+                    }
+                    else{
+                        echo "Waiting";
+                    }
+
+                    ?>
+
+                </small>
+
+            </div>
+
+        </div>
+
+        <?php endforeach; ?>
+
+    </div>
+
+</div>
+
+
+<!-- Summary -->
+
+<div class="card">
+
+    <div class="card-title">
+        <i class="fas fa-clipboard-check"></i>
+        Delivery Summary
+    </div>
+
+    <div class="info-grid">
+
+        <div class="info-box">
+            <div class="info-label">Business</div>
+            <div class="info-value">
+                <?php echo htmlspecialchars($delivery['business_name']); ?>
+            </div>
+        </div>
+
+        <div class="info-box">
+            <div class="info-label">Delivery Fee</div>
+            <div class="info-value">
+                TSh <?php echo number_format($delivery['delivery_fee']); ?>
+            </div>
+        </div>
+
+        <div class="info-box">
+            <div class="info-label">Current Status</div>
+            <div class="info-value">
+                <?php echo ucwords(str_replace("_"," ",$currentStatus)); ?>
+            </div>
+        </div>
+
+        <div class="info-box">
+            <div class="info-label">Customer Contact</div>
+            <div class="info-value">
+                <?php echo htmlspecialchars($delivery['contact_phone']); ?>
+            </div>
+        </div>
+
+    </div>
+
+</div>
+
+
+<!-- Action Buttons -->
+
+<div class="actions">
+
+    <a href="../my-deliveries/my-deliveries.php" class="btn btn-back">
+        <i class="fas fa-arrow-left"></i>
+        Back
+    </a>
+
+    <?php if($currentStatus!='delivered' && $currentStatus!='cancelled'): ?>
+
+    <a href="../update_status/update_status.php?id=<?php echo $delivery['delivery_id']; ?>"
+       class="btn btn-update">
+
+        <i class="fas fa-edit"></i>
+        Update Status
+
+    </a>
+
+    <?php endif; ?>
+
+</div>
+
+</div>
+
+<script>
+
+const steps=document.querySelectorAll('.step');
+
+steps.forEach((step,index)=>{
+
+    step.style.opacity="0";
+    step.style.transform="translateY(20px)";
+
+    setTimeout(()=>{
+
+        step.style.transition="all .5s ease";
+        step.style.opacity="1";
+        step.style.transform="translateY(0)";
+
+    },index*200);
+
+});
+
+</script>
+
+</body>
+</html>

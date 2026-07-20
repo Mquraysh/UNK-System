@@ -1,0 +1,350 @@
+<?php
+// delivery/includes/delivery_sidebar.php 
+require_once __DIR__ . '/../../config/database.php';
+
+// Get current page for active menu highlighting
+$current_page = basename($_SERVER['PHP_SELF']);
+$current_dir = basename(dirname($_SERVER['PHP_SELF']));
+
+$agent_name = 'Delivery Agent';
+$is_available = 0;
+$pending_count = 0;
+$available_count = 0;
+$profile_image = '';
+
+if (isset($_SESSION['user_id']) && $_SESSION['role'] == 'delivery') {
+    $user_id = $_SESSION['user_id'];
+    
+    // Get agent details (without rating column)
+    $agent_q = mysqli_query($conn, "SELECT first_name, last_name, is_available, profile_image FROM delivery_agents WHERE user_id = '$user_id'");
+    if ($agent_q && $row = mysqli_fetch_assoc($agent_q)) {
+        $agent_name = $row['first_name'] . ' ' . $row['last_name'];
+        $is_available = (int)$row['is_available'];
+        $profile_image = $row['profile_image'] ?? '';
+        $_SESSION['agent_name'] = $agent_name;
+        $_SESSION['agent_available'] = $is_available;
+    }
+    
+    if (!isset($_SESSION['agent_id'])) {
+        $id_q = mysqli_query($conn, "SELECT agent_id FROM delivery_agents WHERE user_id = '$user_id'");
+        if ($id_q && $id_row = mysqli_fetch_assoc($id_q)) {
+            $_SESSION['agent_id'] = $id_row['agent_id'];
+        }
+    }
+    
+    $agent_id = $_SESSION['agent_id'] ?? 0;
+    
+    if ($agent_id) {
+        // Get pending deliveries count
+        $pending_sql = "SELECT COUNT(*) as count FROM deliveries WHERE agent_id = '$agent_id' AND status IN ('assigned', 'picked_up', 'in_transit')";
+        $pending_res = mysqli_query($conn, $pending_sql);
+        if ($pending_res) $pending_count = (int)(mysqli_fetch_assoc($pending_res)['count'] ?? 0);
+        
+        // Get available requests count (confirmed, preparing, ready)
+        $available_sql = "SELECT COUNT(*) as count FROM orders 
+                          WHERE agent_id IS NULL 
+                          AND status IN ('confirmed', 'preparing', 'ready')";
+        $available_res = mysqli_query($conn, $available_sql);
+        if ($available_res) $available_count = (int)(mysqli_fetch_assoc($available_res)['count'] ?? 0);
+    }
+}
+?>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', sans-serif; background: #f5f7fb; color: #1f2937; }
+        .delivery-sidebar {
+            position: fixed;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 280px;
+            background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);
+            color: #e2e8f0;
+            overflow-y: auto;
+            z-index: 1000;
+            transition: transform 0.3s ease;
+            box-shadow: 2px 0 15px rgba(0,0,0,0.1);
+        }
+        .delivery-sidebar::-webkit-scrollbar { width: 4px; }
+        .delivery-sidebar::-webkit-scrollbar-track { background: #1e293b; }
+        .delivery-sidebar::-webkit-scrollbar-thumb { background: #e67e22; border-radius: 4px; }
+        .sidebar-header {
+            padding: 30px 20px 20px;
+            text-align: center;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+            background: rgba(0,0,0,0.15);
+        }
+        .sidebar-logo {
+            font-size: 16px;
+            font-weight: 500;
+            margin-bottom: 16px;
+        }
+        .sidebar-logo i { color: #e67e22; margin-right: 8px; }
+        .sidebar-logo span { color: white; letter-spacing: -0.5px; }
+        
+        /* Profile Image Styles */
+        .agent-avatar {
+            width: 70px;
+            height: 70px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 12px;
+            font-size: 28px;
+            font-weight: 700;
+            color: white;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            text-transform: uppercase;
+            overflow: hidden;
+            background: linear-gradient(135deg, #e67e22, #f39c12);
+            flex-shrink: 0;
+        }
+        .agent-avatar img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .agent-avatar .avatar-text {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            height: 100%;
+        }
+        
+        .agent-name {
+            font-size: 16px;
+            font-weight: 700;
+            color: white;
+            margin-bottom: 8px;
+        }
+        .agent-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 14px;
+            border-radius: 40px;
+            font-size: 11px;
+            font-weight: 600;
+            background: rgba(16,185,129,0.15);
+            color: #10b981;
+            border: 1px solid rgba(16,185,129,0.3);
+        }
+        .agent-status.offline {
+            background: rgba(239,68,68,0.15);
+            color: #ef4444;
+            border-color: rgba(239,68,68,0.3);
+        }
+        
+        .sidebar-menu {
+            list-style: none;
+            padding: 20px 16px;
+            margin: 0;
+        }
+        .sidebar-item {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding: 12px 16px;
+            margin: 2px 0;
+            color: #94a3b8;
+            text-decoration: none;
+            border-radius: 12px;
+            transition: all 0.2s;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        .sidebar-item i { width: 22px; font-size: 16px; text-align: center; }
+        .sidebar-item:hover {
+            background: rgba(230,126,34,0.12);
+            color: #e67e22;
+        }
+        .sidebar-item.active {
+            background: linear-gradient(105deg, rgba(230,126,34,0.15), rgba(230,126,34,0.05));
+            color: #e67e22;
+            border-left: 3px solid #e67e22;
+        }
+        .sidebar-badge {
+            margin-left: auto;
+            background: #e67e22;
+            color: white;
+            border-radius: 40px;
+            padding: 2px 8px;
+            font-size: 10px;
+            font-weight: 700;
+        }
+        .sidebar-badge.pending { background: #f39c12; }
+        .sidebar-footer {
+            padding: 20px 16px;
+            border-top: 1px solid rgba(255,255,255,0.08);
+            margin-top: 20px;
+        }
+        .logout-btn {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding: 12px 16px;
+            background: rgba(231,76,60,0.12);
+            border-radius: 12px;
+            color: #e74c3c;
+            text-decoration: none;
+            transition: all 0.2s;
+            font-weight: 500;
+        }
+        .logout-btn:hover {
+            background: rgba(231,76,60,0.2);
+            transform: translateX(3px);
+        }
+        .menu-toggle {
+            display: none;
+            position: fixed;
+            top: 16px;
+            left: 16px;
+            background: #e67e22;
+            color: white;
+            border: none;
+            width: 45px;
+            height: 45px;
+            border-radius: 12px;
+            cursor: pointer;
+            z-index: 1001;
+            font-size: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+        }
+        .menu-toggle:hover { background: #d35400; transform: scale(1.02); }
+        .sidebar-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.6);
+            z-index: 999;
+            backdrop-filter: blur(2px);
+        }
+        @media (max-width: 1024px) {
+            .menu-toggle { display: flex; align-items: center; justify-content: center; }
+            .delivery-sidebar { transform: translateX(-100%); }
+            .delivery-sidebar.open { transform: translateX(0); }
+            .sidebar-overlay.active { display: block; }
+        }
+    </style>
+</head>
+<body>
+
+<button class="menu-toggle" id="menuToggle">
+    <i class="fas fa-bars"></i>
+</button>
+<div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+<div class="delivery-sidebar" id="deliverySidebar">
+    <div class="sidebar-header">
+        <div class="agent-avatar">
+            <?php if (!empty($profile_image) && file_exists('../../' . $profile_image)): ?>
+                <img src="../../<?php echo htmlspecialchars($profile_image); ?>" alt="<?php echo htmlspecialchars($agent_name); ?>">
+            <?php elseif (!empty($profile_image) && file_exists($profile_image)): ?>
+                <img src="<?php echo htmlspecialchars($profile_image); ?>" alt="<?php echo htmlspecialchars($agent_name); ?>">
+            <?php else: ?>
+                <div class="avatar-text">
+                    <?php echo strtoupper(substr($agent_name, 0, 1)); ?>
+                </div>
+            <?php endif; ?>
+        </div>
+        <div class="sidebar-logo">
+            <i class="fas fa-truck"></i>
+            <span>UNK Delivery</span>
+        </div>
+        <div class="agent-name"><?php echo htmlspecialchars($agent_name); ?></div>
+        <div class="agent-status <?php echo $is_available ? '' : 'offline'; ?>">
+            <i class="fas fa-circle"></i>
+            <?php echo $is_available ? 'Online – Accepting deliveries' : 'Offline – Not accepting'; ?>
+        </div>
+        
+        <!-- RATING DISPLAY REMOVED -->
+    </div>
+
+    <ul class="sidebar-menu">
+        <!-- Dashboard -->
+        <li><a href="../das/dashboard.php" class="sidebar-item <?php echo ($current_page == 'dashboard.php') ? 'active' : ''; ?>">
+            <i class="fas fa-tachometer-alt"></i><span>Dashboard</span></a>
+        </li>
+        <!-- Available Requests -->
+        <li><a href="../requests/requests.php" class="sidebar-item <?php echo ($current_page == 'requests.php') ? 'active' : ''; ?>">
+            <i class="fas fa-clipboard-list"></i><span>Available Requests</span>
+            <?php if ($available_count > 0): ?>
+                <span class="sidebar-badge"><?php echo $available_count; ?></span>
+            <?php endif; ?>
+        </a></li>
+        <!-- My Deliveries -->
+        <li><a href="../my-deliveries/my-deliveries.php" class="sidebar-item <?php echo ($current_page == 'my-deliveries.php') ? 'active' : ''; ?>">
+            <i class="fas fa-truck"></i><span>My Deliveries</span>
+            <?php if ($pending_count > 0): ?>
+                <span class="sidebar-badge pending"><?php echo $pending_count; ?></span>
+            <?php endif; ?>
+        </a></li>
+        <!-- Earnings -->
+        <li><a href="../earnings/earnings.php" class="sidebar-item <?php echo ($current_page == 'earnings.php') ? 'active' : ''; ?>">
+            <i class="fas fa-money-bill-wave"></i><span>Earnings</span></a>
+        </li>
+        <!-- My Ratings -->
+        <li><a href="../ratings/my-rating.php" class="sidebar-item <?php echo ($current_page == 'my-rating.php') ? 'active' : ''; ?>">
+            <i class="fas fa-star"></i><span>My Ratings</span></a>
+        </li>
+        <!-- Support -->
+        <li><a href="../support/index.php" class="sidebar-item <?php echo ($current_dir == 'support') ? 'active' : ''; ?>">
+            <i class="fas fa-headset"></i><span>Support</span></a>
+        </li>
+        <!-- Settings -->
+        <li><a href="../settings/index.php" class="sidebar-item <?php echo ($current_dir == 'settings') ? 'active' : ''; ?>">
+            <i class="fas fa-cog"></i><span>Settings</span></a>
+        </li>
+    </ul>
+
+    <div class="sidebar-footer">
+        <a href="../../logout.php" class="logout-btn">
+            <i class="fas fa-sign-out-alt"></i>
+            <span>Logout</span>
+        </a>
+    </div>
+</div>
+
+<script>
+    (function() {
+        const toggleBtn = document.getElementById('menuToggle');
+        const sidebar = document.getElementById('deliverySidebar');
+        const overlay = document.getElementById('sidebarOverlay');
+        function closeSidebar() {
+            if (sidebar) sidebar.classList.remove('open');
+            if (overlay) overlay.classList.remove('active');
+            document.body.style.overflow = '';
+        }
+        if (toggleBtn) {
+            toggleBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                if (sidebar) sidebar.classList.toggle('open');
+                if (overlay) overlay.classList.toggle('active');
+                document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : '';
+            });
+        }
+        if (overlay) overlay.addEventListener('click', closeSidebar);
+        window.addEventListener('resize', function() {
+            if (window.innerWidth > 1024) closeSidebar();
+        });
+        const links = document.querySelectorAll('.sidebar-item');
+        if (window.innerWidth <= 1024) {
+            links.forEach(link => {
+                link.addEventListener('click', function() { setTimeout(closeSidebar, 100); });
+            });
+        }
+    })();
+</script>
+</body>
+</html>
