@@ -1,5 +1,5 @@
 <?php
-// business/deliveries/tracking.php - Fixed Display
+// business/deliveries/tracking.php - Updated with Real Map Display
 require_once '../../config/database.php';
 session_start();
 
@@ -133,6 +133,7 @@ include '../includes/business_sidebar.php';
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Inter', sans-serif; background: #f5f7fb; color: #1f2937; }
@@ -194,11 +195,12 @@ include '../includes/business_sidebar.php';
         .full-width { grid-column: 1 / -1; }
         
         #map {
-            height: 450px;
+            height: 500px;
             width: 100%;
             border-radius: 1.25rem;
             border: 1px solid #e2e8f0;
             z-index: 1;
+            background: #e8ecf1;
         }
         
         .card {
@@ -340,6 +342,19 @@ include '../includes/business_sidebar.php';
         .timeline {
             position: relative;
             padding-left: 2rem;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .timeline::-webkit-scrollbar {
+            width: 4px;
+        }
+        .timeline::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+        .timeline::-webkit-scrollbar-thumb {
+            background: #e67e22;
+            border-radius: 10px;
         }
         .timeline::before {
             content: '';
@@ -425,6 +440,22 @@ include '../includes/business_sidebar.php';
             color: #64748b;
         }
         
+        /* Live agent indicator */
+        .agent-live {
+            background: #d1fae5;
+            color: #059669;
+            padding: 0.2rem 0.6rem;
+            border-radius: 1rem;
+            font-size: 0.6rem;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+        }
+        .agent-live i {
+            animation: pulse-dot 1.5s infinite;
+        }
+        
         @media (max-width: 1100px) {
             .tracking-grid { grid-template-columns: 1fr; }
             .full-width { grid-column: 1; }
@@ -434,7 +465,7 @@ include '../includes/business_sidebar.php';
             .info-label { width: 100%; }
             .page-header { flex-direction: column; align-items: flex-start; }
             .location-point { flex-wrap: wrap; }
-            #map { height: 300px; }
+            #map { height: 350px; }
             .location-point .coords { width: 100%; text-align: center; }
         }
     </style>
@@ -445,7 +476,7 @@ include '../includes/business_sidebar.php';
     <div class="page-header">
         <div>
             <h1><i class="fas fa-map-marked-alt"></i> Track Delivery</h1>
-            <p>Real-time tracking for delivery #<?php echo $delivery_id; ?> · Order #<?php echo $delivery['order_id']; ?></p>
+            <p>Real-time tracking for delivery <?php echo $delivery_id; ?> · Order <?php echo $delivery['order_id']; ?></p>
         </div>
         <a href="view.php?id=<?php echo $delivery_id; ?>" class="btn-back">
             <i class="fas fa-arrow-left"></i> Back to Details
@@ -463,6 +494,11 @@ include '../includes/business_sidebar.php';
                         <i class="fas <?php echo $status_info['icon']; ?>"></i>
                         <?php echo $status_info['label']; ?>
                     </span>
+                    <?php if($hasAgentLocation): ?>
+                        <span class="agent-live">
+                            <i class="fas fa-circle"></i> Agent Live
+                        </span>
+                    <?php endif; ?>
                     <?php if(!$hasAnyLocation): ?>
                         <span style="font-size:0.6rem; background:#fee2e2; color:#dc2626; padding:0.2rem 0.5rem; border-radius:1rem;">
                             <i class="fas fa-exclamation-triangle"></i> No locations set
@@ -483,11 +519,11 @@ include '../includes/business_sidebar.php';
             <div class="card-body">
                 <div class="info-row">
                     <span class="info-label">Delivery ID</span>
-                    <span class="info-value"><strong>#<?php echo $delivery_id; ?></strong></span>
+                    <span class="info-value"><strong><?php echo $delivery_id; ?></strong></span>
                 </div>
                 <div class="info-row">
                     <span class="info-label">Order ID</span>
-                    <span class="info-value"><a href="../orders/view.php?id=<?php echo $delivery['order_id']; ?>">#<?php echo $delivery['order_id']; ?></a></span>
+                    <span class="info-value"><a href="../orders/view.php?id=<?php echo $delivery['order_id']; ?>"> <?php echo $delivery['order_id']; ?></a></span>
                 </div>
                 <div class="info-row">
                     <span class="info-label">Status</span>
@@ -524,6 +560,11 @@ include '../includes/business_sidebar.php';
                         <?php echo htmlspecialchars($delivery['agent_first_name'] . ' ' . $delivery['agent_last_name']); ?>
                         <?php if ($delivery['vehicle_type']): ?>
                             <span style="font-size:0.7rem; color:#64748b;">(<?php echo ucfirst($delivery['vehicle_type']); ?>)</span>
+                        <?php endif; ?>
+                        <?php if ($delivery['agent_phone']): ?>
+                            <span style="font-size:0.7rem; color:#64748b; margin-left:0.3rem;">
+                                <i class="fas fa-phone"></i> <?php echo $delivery['agent_phone']; ?>
+                            </span>
                         <?php endif; ?>
                     </span>
                 </div>
@@ -583,6 +624,11 @@ include '../includes/business_sidebar.php';
                             <?php endif; ?>
                             <?php if ($delivery['vehicle_registration']): ?>
                                 • <i class="fas fa-id-card"></i> <?php echo strtoupper($delivery['vehicle_registration']); ?>
+                            <?php endif; ?>
+                            <?php if ($hasAgentLocation && $delivery['status'] != 'delivered'): ?>
+                                <span class="agent-live" style="margin-left:0.5rem;">
+                                    <i class="fas fa-circle"></i> Live
+                                </span>
                             <?php endif; ?>
                         </div>
                     </div>
@@ -680,6 +726,7 @@ include '../includes/business_sidebar.php';
 
 <!-- Leaflet JS -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
 <script>
 document.addEventListener('DOMContentLoaded', function() {
     // ============================================================
@@ -713,13 +760,14 @@ document.addEventListener('DOMContentLoaded', function() {
     };
 
     const hasAnyLocation = <?php echo $hasAnyLocation ? 'true' : 'false'; ?>;
+    const currentStatus = '<?php echo $delivery['status']; ?>';
 
     // ============================================================
     // CREATE CUSTOM ICONS
     // ============================================================
     function createIcon(color, icon) {
         return L.divIcon({
-            html: `<i class="fas ${icon}" style="color:white; font-size:16px;"></i>`,
+            html: `<i class="fas ${icon}" style="color:white; font-size:18px; display:flex; align-items:center; justify-content:center; width:40px; height:40px; background:${color}; border-radius:50%; border:3px solid white; box-shadow:0 2px 8px rgba(0,0,0,0.2);"></i>`,
             className: 'custom-marker',
             iconSize: [40, 40],
             iconAnchor: [20, 40],
@@ -735,17 +783,31 @@ document.addEventListener('DOMContentLoaded', function() {
         attributionControl: true
     });
 
-    // Tile Layer
+    // OpenStreetMap with better tiles
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '© OpenStreetMap contributors',
-        maxZoom: 19
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        maxZoom: 19,
+        minZoom: 3
     }).addTo(map);
 
     // ============================================================
-    // ADD MARKERS AND ROUTE
+    // ADD MARKERS
     // ============================================================
     const validLocations = [];
     const markers = [];
+
+    // Helper to get status emoji
+    function getStatusEmoji(status) {
+        const emojis = {
+            'pending': '⏳',
+            'assigned': '📋',
+            'picked_up': '📦',
+            'in_transit': '🚚',
+            'delivered': '✅',
+            'cancelled': '❌'
+        };
+        return emojis[status] || '📍';
+    }
 
     // Business Marker
     if (locations.business.hasLocation && locations.business.lat && locations.business.lng) {
@@ -753,24 +815,58 @@ document.addEventListener('DOMContentLoaded', function() {
             icon: createIcon('#e67e22', 'fa-store')
         }).addTo(map);
         marker.bindPopup(`
-            <strong>🏪 Business</strong><br>
-            ${locations.business.name}
+            <div style="font-family:'Inter',sans-serif;padding:4px;">
+                <strong>🏪 Business</strong><br>
+                ${locations.business.name}<br>
+                <span style="font-size:11px;color:#64748b;">📍 Pickup Location</span>
+            </div>
         `);
         markers.push(marker);
-        validLocations.push({ lat: locations.business.lat, lng: locations.business.lng, type: 'business' });
+        validLocations.push({ lat: locations.business.lat, lng: locations.business.lng, type: 'business', name: locations.business.name });
     }
 
     // Agent Marker
     if (locations.agent.hasLocation && locations.agent.lat && locations.agent.lng) {
+        const isDelivered = currentStatus === 'delivered';
         const marker = L.marker([locations.agent.lat, locations.agent.lng], {
-            icon: createIcon('#3b82f6', 'fa-motorcycle')
+            icon: createIcon(isDelivered ? '#94a3b8' : '#3b82f6', 'fa-motorcycle')
         }).addTo(map);
         marker.bindPopup(`
-            <strong>🛵 Delivery Agent</strong><br>
-            ${locations.agent.name}
+            <div style="font-family:'Inter',sans-serif;padding:4px;">
+                <strong>🛵 Delivery Agent</strong><br>
+                ${locations.agent.name}<br>
+                <span style="font-size:11px;color:#64748b;">${isDelivered ? '✅ Delivery Completed' : '📍 Current Location'}</span>
+                ${!isDelivered ? '<br><span style="font-size:10px;color:#10b981;">🟢 Live Tracking</span>' : ''}
+            </div>
         `);
         markers.push(marker);
-        validLocations.push({ lat: locations.agent.lat, lng: locations.agent.lng, type: 'agent' });
+        validLocations.push({ lat: locations.agent.lat, lng: locations.agent.lng, type: 'agent', name: locations.agent.name });
+        
+        // Add pulsing circle for agent if not delivered
+        if (!isDelivered) {
+            const circle = L.circle([locations.agent.lat, locations.agent.lng], {
+                radius: 30,
+                color: '#3b82f6',
+                fillColor: '#3b82f6',
+                fillOpacity: 0.2,
+                weight: 2,
+                opacity: 0.6
+            }).addTo(map);
+            
+            // Animate circle
+            let radius = 30;
+            let growing = true;
+            setInterval(() => {
+                if (growing) {
+                    radius += 2;
+                    if (radius > 60) growing = false;
+                } else {
+                    radius -= 2;
+                    if (radius < 30) growing = true;
+                }
+                circle.setRadius(radius);
+            }, 100);
+        }
     }
 
     // Customer Marker
@@ -779,81 +875,83 @@ document.addEventListener('DOMContentLoaded', function() {
             icon: createIcon('#10b981', 'fa-user')
         }).addTo(map);
         marker.bindPopup(`
-            <strong>👤 Customer</strong><br>
-            ${locations.customer.name}
+            <div style="font-family:'Inter',sans-serif;padding:4px;">
+                <strong>👤 Customer</strong><br>
+                ${locations.customer.name}<br>
+                <span style="font-size:11px;color:#64748b;">📍 Delivery Location</span>
+                ${currentStatus === 'delivered' ? '<br><span style="font-size:10px;color:#10b981;">✅ Delivered</span>' : ''}
+            </div>
         `);
         markers.push(marker);
-        validLocations.push({ lat: locations.customer.lat, lng: locations.customer.lng, type: 'customer' });
+        validLocations.push({ lat: locations.customer.lat, lng: locations.customer.lng, type: 'customer', name: locations.customer.name });
     }
 
     // ============================================================
-    // DRAW ROUTE
+    // DRAW ROUTE WITH REAL ROADS USING LEAFLET ROUTING MACHINE
     // ============================================================
+    let routingControl = null;
+    let totalDistance = 0;
+
     if (validLocations.length >= 2) {
-        const routePoints = validLocations.map(loc => [loc.lat, loc.lng]);
-        const polyline = L.polyline(routePoints, {
-            color: '#e67e22',
-            weight: 3,
-            opacity: 0.7,
-            dashArray: '8, 8',
-            smoothFactor: 1
+        // Create waypoints
+        const waypoints = validLocations.map(loc => L.latLng(loc.lat, loc.lng));
+        
+        // Create routing control
+        routingControl = L.Routing.control({
+            waypoints: waypoints,
+            routeWhileDragging: false,
+            showAlternatives: false,
+            lineOptions: {
+                styles: [
+                    { color: '#e67e22', weight: 4, opacity: 0.8 },
+                    { color: '#f39c12', weight: 2, opacity: 0.4, dashArray: '5, 10' }
+                ]
+            },
+            createMarker: function() { return null; }, // Don't create markers
+            show: false, // Don't show instructions
+            fitSelectedRoutes: true,
+            addWaypoints: false
         }).addTo(map);
 
-        const bounds = L.latLngBounds(routePoints);
-        map.fitBounds(bounds, { padding: [50, 50] });
-
-        function calculateTotalDistance(points) {
-            let total = 0;
-            for (let i = 1; i < points.length; i++) {
-                const p1 = L.latLng(points[i-1][0], points[i-1][1]);
-                const p2 = L.latLng(points[i][0], points[i][1]);
-                total += p1.distanceTo(p2);
+        // Get distance when route is calculated
+        routingControl.on('routesfound', function(e) {
+            const routes = e.routes;
+            if (routes && routes.length > 0) {
+                const route = routes[0];
+                totalDistance = route.summary.totalDistance / 1000; // Convert to km
+                document.getElementById('distanceDisplay').innerHTML = `
+                    <i class="fas fa-route"></i> ${totalDistance.toFixed(1)} km via road
+                `;
             }
-            return total / 1000;
-        }
+        });
 
-        const totalKm = calculateTotalDistance(routePoints);
-        if (totalKm > 0) {
-            document.getElementById('distanceDisplay').innerHTML = `
-                <i class="fas fa-route"></i> ${totalKm.toFixed(1)} km total
-            `;
-        } else {
-            document.getElementById('distanceDisplay').innerHTML = `
-                <i class="fas fa-route"></i> Distance not available
-            `;
-        }
+        // Fit map to show all locations after route is loaded
+        setTimeout(() => {
+            const bounds = L.latLngBounds(waypoints);
+            map.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
+        }, 500);
 
-        const routeLabel = L.control({ position: 'bottomleft' });
-        routeLabel.onAdd = function() {
-            const div = L.DomUtil.create('div', 'route-info');
-            div.innerHTML = `
-                <div style="background:white; padding:8px 14px; border-radius:10px; box-shadow:0 2px 10px rgba(0,0,0,0.1); font-size:12px;">
-                    <strong>📍 Route</strong><br>
-                    ${validLocations.length} locations • ${totalKm.toFixed(1)} km
-                </div>
-            `;
-            return div;
-        };
-        routeLabel.addTo(map);
     } else if (validLocations.length == 1) {
         map.setView([validLocations[0].lat, validLocations[0].lng], 13);
         document.getElementById('distanceDisplay').innerHTML = `
             <i class="fas fa-route"></i> Only one location available
         `;
     } else {
+        // Default to Dar es Salaam
         map.setView([-6.792354, 39.208328], 13);
         document.getElementById('distanceDisplay').innerHTML = `
             <i class="fas fa-route"></i> No location data available
         `;
         
+        // Show info message on map
         const noLocationControl = L.control({ position: 'topright' });
         noLocationControl.onAdd = function() {
             const div = L.DomUtil.create('div', 'no-location-info');
             div.innerHTML = `
-                <div style="background:#fee2e2; padding:10px 14px; border-radius:10px; box-shadow:0 2px 10px rgba(0,0,0,0.1); border-left:4px solid #dc2626; max-width:250px;">
+                <div style="background:#fee2e2; padding:10px 14px; border-radius:10px; box-shadow:0 2px 10px rgba(0,0,0,0.1); border-left:4px solid #dc2626; max-width:280px;">
                     <strong><i class="fas fa-exclamation-triangle"></i> No Locations Set</strong>
                     <p style="font-size:12px; margin-top:4px; color:#991b1b;">
-                        Please set locations for Business, Agent, and Customer to enable tracking.
+                        Please set locations for Business, Agent, and Customer to enable real tracking.
                     </p>
                 </div>
             `;
@@ -873,13 +971,20 @@ document.addEventListener('DOMContentLoaded', function() {
         div.style.borderRadius = '10px';
         div.style.boxShadow = '0 2px 10px rgba(0,0,0,0.1)';
         div.style.fontSize = '11px';
+        div.style.fontFamily = "'Inter', sans-serif";
         div.innerHTML = `
-            <div><span style="display:inline-block; width:12px; height:12px; background:#e67e22; border-radius:50%; margin-right:6px;"></span> Business</div>
-            <div><span style="display:inline-block; width:12px; height:12px; background:#3b82f6; border-radius:50%; margin-right:6px;"></span> Delivery Agent</div>
-            <div><span style="display:inline-block; width:12px; height:12px; background:#10b981; border-radius:50%; margin-right:6px;"></span> Customer</div>
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;">
+                <span style="display:inline-block; width:12px; height:12px; background:#e67e22; border-radius:50%;"></span> Business
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;">
+                <span style="display:inline-block; width:12px; height:12px; background:#3b82f6; border-radius:50%;"></span> Delivery Agent
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;">
+                <span style="display:inline-block; width:12px; height:12px; background:#10b981; border-radius:50%;"></span> Customer
+            </div>
             ${validLocations.length >= 2 ? `
                 <div style="margin-top:4px; border-top:1px solid #e2e8f0; padding-top:4px;">
-                    <span style="display:inline-block; width:20px; height:2px; background:#e67e22; margin-right:6px;"></span> Route (${validLocations.length} points)
+                    <span style="display:inline-block; width:20px; height:3px; background:#e67e22; margin-right:6px;"></span> Road Route
                 </div>
             ` : ''}
         `;
@@ -893,6 +998,11 @@ document.addEventListener('DOMContentLoaded', function() {
     setTimeout(() => {
         map.invalidateSize();
     }, 500);
+
+    // Refresh on window resize
+    window.addEventListener('resize', function() {
+        map.invalidateSize();
+    });
 
     // ============================================================
     // SIDEBAR ACTIVE LINK
@@ -912,35 +1022,45 @@ document.addEventListener('DOMContentLoaded', function() {
         background: none !important;
         border: none !important;
     }
-    .custom-marker i {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 40px;
-        height: 40px;
-        border-radius: 50%;
-        border: 2px solid white;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-        background: #e67e22;
-    }
-    .custom-marker i.fa-store { background: #e67e22; }
-    .custom-marker i.fa-motorcycle { background: #3b82f6; }
-    .custom-marker i.fa-user { background: #10b981; }
     
     .leaflet-popup-content-wrapper {
-        border-radius: 10px !important;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.1) !important;
+        border-radius: 12px !important;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.15) !important;
     }
     .leaflet-popup-content {
         font-family: 'Inter', sans-serif !important;
         font-size: 13px !important;
         padding: 8px 12px !important;
     }
-    .route-info {
-        font-family: 'Inter', sans-serif;
+    
+    .leaflet-routing-container {
+        display: none !important;
     }
-    .no-location-info {
-        font-family: 'Inter', sans-serif;
+    
+    .leaflet-routing-alt {
+        display: none !important;
+    }
+    
+    .leaflet-control-zoom {
+        border-radius: 10px !important;
+        overflow: hidden;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.1) !important;
+    }
+    
+    .leaflet-control-zoom a {
+        background: white !important;
+        color: #1e293b !important;
+        font-weight: 700 !important;
+        padding: 8px 12px !important;
+    }
+    
+    .leaflet-control-zoom a:hover {
+        background: #e67e22 !important;
+        color: white !important;
+    }
+    
+    .leaflet-routing-icon {
+        background-image: none !important;
     }
 </style>
 

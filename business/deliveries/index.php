@@ -507,9 +507,9 @@ include '../includes/business_sidebar.php';
                                 <a href="view.php?id=<?php echo $delivery['delivery_id']; ?>" class="btn-sm btn-view">
                                     <i class="fas fa-eye"></i> View
                                 </a>
-                                <a href="tracking.php?id=<?php echo $delivery['delivery_id']; ?>" class="btn-sm btn-track">
+                                <!-- <a href="tracking.php?id=<?php echo $delivery['delivery_id']; ?>" class="btn-sm btn-track">
                                     <i class="fas fa-map-marker-alt"></i> Track
-                                </a>
+                                </a> -->
                             </div>
                         </td>
                     </tr>

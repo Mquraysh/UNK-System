@@ -1,7 +1,6 @@
 <?php
 // admin/login.php 
 require_once '../config/database.php';
-
 session_start();
 
 // Redirect if already logged in
@@ -14,7 +13,43 @@ $error = '';
 $email = '';
 $success = '';
 
-if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+// Function to send OTP email
+function sendOTPEmail($to, $otp, $name) {
+    $phpmailer_path = __DIR__ . '/vendor/PHPMailer/src/Exception.php';
+    
+    if (file_exists($phpmailer_path)) {
+        require_once __DIR__ . '/vendor/PHPMailer/src/Exception.php';
+        require_once __DIR__ . '/vendor/PHPMailer/src/PHPMailer.php';
+        require_once __DIR__ . '/vendor/PHPMailer/src/SMTP.php';
+        
+        $mail = new PHPMailer\PHPMailer\PHPMailer(true);
+        try {
+            $mail->isSMTP();
+            $mail->Host       = 'smtp.gmail.com';
+            $mail->SMTPAuth   = true;
+            $mail->Username   = 'albinokh425@gmail.com';
+            $mail->Password   = 'hgww grom kage sadr';
+            $mail->SMTPSecure = PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_STARTTLS;
+            $mail->Port       = 587;
+            
+            $mail->setFrom('no-reply@unksystem.com', 'UNK System Admin');
+            $mail->addAddress($to, $name);
+            
+            $mail->isHTML(true);
+            $mail->Subject = 'Your Login Verification Code - UNK System Admin';
+            $mail->Body = '<div style="text-align:center; padding:20px;"><h2>UNK System Admin</h2><p>Your verification code is:</p><h1 style="color:#e67e22; font-size:36px; letter-spacing:5px;">' . $otp . '</h1><p>Valid for 10 minutes.</p></div>';
+            $mail->AltBody = "Your verification code is: $otp";
+            $mail->send();
+            return true;
+        } catch (Exception $e) {
+            error_log("PHPMailer Error: " . $e->getMessage());
+            return false;
+        }
+    }
+    return false;
+}
+
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
     $email = trim($_POST['email']);
     $password = $_POST['password'];
     
@@ -31,18 +66,35 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         if ($user['status'] != 'active') {
             $error = "Your account is inactive. Please contact support!";
         } elseif (password_verify($password, $user['password_hash'])) {
-            // Set session variables
-            $_SESSION['user_id'] = $user['user_id'];
-            $_SESSION['role'] = $user['role'];
-            $_SESSION['email'] = $user['email'];
-            $_SESSION['full_name'] = $user['full_name'];
+            // Password is correct - Generate OTP
+            $otp = sprintf("%06d", mt_rand(1, 999999));
             
-            // Update last login time
-            $update_login = "UPDATE users SET last_login = NOW() WHERE user_id = " . $user['user_id'];
-            mysqli_query($conn, $update_login);
+            // Delete old OTPs for this email
+            mysqli_query($conn, "DELETE FROM otp_verifications WHERE email = '$email' AND purpose = 'admin_logi'");
             
-            header("Location: das/dashboard.php");
-            exit();
+            // Insert new OTP
+            $expires_at = date('Y-m-d H:i:s', strtotime('+10 minutes'));
+            $insert_sql = "INSERT INTO otp_verifications (email, otp_code, purpose, expires_at, created_at) VALUES (?, ?, 'admin_login00', ?, NOW())";
+            $stmt_ins = mysqli_prepare($conn, $insert_sql);
+            mysqli_stmt_bind_param($stmt_ins, 'sss', $email, $otp, $expires_at);
+            mysqli_stmt_execute($stmt_ins);
+            mysqli_stmt_close($stmt_ins);
+            
+            // Send OTP email
+            $user_name = $user['full_name'];
+            if (sendOTPEmail($email, $otp, $user_name)) {
+                // Store user info in session temporarily
+                $_SESSION['temp_admin_user_id'] = $user['user_id'];
+                $_SESSION['temp_admin_email'] = $email;
+                $_SESSION['temp_admin_name'] = $user['full_name'];
+                
+                // Redirect to OTP verification page
+                header("Location: verify-otp.php");
+                exit();
+            } else {
+                $error = "Failed to send verification code. Please try again.";
+                
+            }
         } else {
             $error = "Invalid email or password!";
         }
@@ -61,7 +113,7 @@ include '../includes/header.php';
     <title>Admin Login - UNK System</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <style>
-   * {
+        * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
@@ -69,7 +121,7 @@ include '../includes/header.php';
         
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: #f0f2f5;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
         }
         
@@ -82,7 +134,7 @@ include '../includes/header.php';
         .card {
             background: white;
             border-radius: 20px;
-            box-shadow: 0 5px 25px rgba(0,0,0,0.1);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.15);
             overflow: hidden;
         }
         
@@ -196,6 +248,16 @@ include '../includes/header.php';
             border: 1px solid #c3e6cb;
         }
         
+        .info-text {
+            background: #e3f2fd;
+            padding: 10px;
+            border-radius: 10px;
+            font-size: 12px;
+            color: #1565c0;
+            text-align: center;
+            margin-top: 15px;
+        }
+        
         .register-link {
             text-align: center;
             margin-top: 20px;
@@ -285,10 +347,14 @@ include '../includes/header.php';
                     </div>
                 </div>
                 
-                <button type="submit" class="btn">
+                <button type="submit" name="login" class="btn">
                     <i class="fas fa-sign-in-alt"></i> Login
                 </button>
             </form>
+            
+            <!-- <div class="info-text">
+                <i class="fas fa-shield-alt"></i> We'll send a verification code to your email after login
+            </div> -->
             
             <div class="register-link">
                 <p><a href="../customer/login.php">Customer Login</a> | <a href="../business/login.php">Business Login</a> | <a href="../delivery/login.php">Delivery Login</a></p>

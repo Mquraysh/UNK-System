@@ -81,7 +81,7 @@ $last_view = $_SESSION['last_requests_view'];
 
 $new_available_sql = "SELECT COUNT(*) as count FROM orders 
                       WHERE agent_id IS NULL 
-                      AND status IN ('ready', 'preparing')
+                      AND status IN ('confirmed','ready', 'preparing')
                       AND order_date > ?";
 $stmt = mysqli_prepare($conn, $new_available_sql);
 mysqli_stmt_bind_param($stmt, "s", $last_view);
@@ -92,7 +92,7 @@ mysqli_stmt_close($stmt);
 
 $total_available_sql = "SELECT COUNT(*) as count FROM orders 
                         WHERE agent_id IS NULL 
-                        AND status IN ('ready', 'preparing')";
+                        AND status IN ('confirmed','ready', 'preparing')";
 $total_available_result = mysqli_query($conn, $total_available_sql);
 $total_available_count = (int)(mysqli_fetch_assoc($total_available_result)['count'] ?? 0);
 

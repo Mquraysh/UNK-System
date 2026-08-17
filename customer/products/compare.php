@@ -618,7 +618,7 @@ unset($_SESSION['flash_message'], $_SESSION['flash_type']);
                 ?>
                 <div class="winner-card">
                     <h3><i class="fas fa-trophy" style="color: #f59e0b;"></i> Best Value Recommendation</h3>
-                    <div class="winner-name">🏆 <?= htmlspecialchars($best_value['name']) ?></div>
+                    <div class="winner-name"> <?= htmlspecialchars($best_value['name']) ?></div>
                     <p style="margin-top: 8px;">
                         Best balance of <strong>Price</strong> and <strong>Quality</strong> based on <?= $ratings[$best_value['product_id']]['count'] ?> reviews
                     </p>

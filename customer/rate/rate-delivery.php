@@ -1,5 +1,5 @@
 <?php
-// customer/rate/rate-delivery.php - Rate Your Delivery Agent
+// customer/rate/rate-delivery.php 
 require_once '../../config/database.php';
 session_start();
 
@@ -25,9 +25,7 @@ if ($delivery_id == 0) {
     exit();
 }
 
-// ============================================
 // CHECK IF DELIVERY EXISTS AND IS DELIVERED
-// ============================================
 $delivery_sql = "SELECT 
                     d.delivery_id,
                     d.order_id,
@@ -67,9 +65,7 @@ if (mysqli_num_rows($delivery_result) == 0) {
 }
 $delivery = mysqli_fetch_assoc($delivery_result);
 
-// ============================================
 // CHECK IF ALREADY RATED IN delivery_ratings
-// ============================================
 $check_rating = mysqli_query($conn, "SELECT rating_id FROM delivery_ratings WHERE delivery_id = $delivery_id AND customer_id = $customer_id");
 if (mysqli_num_rows($check_rating) > 0) {
     $_SESSION['flash_message'] = "You have already rated this delivery.";
@@ -78,9 +74,7 @@ if (mysqli_num_rows($check_rating) > 0) {
     exit();
 }
 
-// ============================================
 // GET AGENT AVERAGE RATING FROM delivery_ratings
-// ============================================
 $agent_id = $delivery['agent_id'];
 $avg_sql = "SELECT 
                 AVG(rating) as avg_rating, 
@@ -92,9 +86,7 @@ $avg_data = mysqli_fetch_assoc($avg_result);
 $agent_avg_rating = $avg_data['avg_rating'] ?? 0;
 $agent_total_ratings = $avg_data['total_ratings'] ?? 0;
 
-// ============================================
 // HANDLE RATING SUBMISSION
-// ============================================
 $error = '';
 $success = '';
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['submit_rating'])) {
@@ -479,7 +471,7 @@ include '../includes/customer_sidebar.php';
     
     <div class="rating-card">
         <div class="rating-card-header">
-            <i class="fas fa-truck"></i> Delivery #<?php echo $delivery_id; ?>
+            <i class="fas fa-truck"></i> Delivery <?php echo $delivery_id; ?>
             <span class="badge"><i class="fas fa-check-circle"></i> Completed</span>
         </div>
         <div class="rating-card-body">
@@ -487,7 +479,7 @@ include '../includes/customer_sidebar.php';
             <div class="delivery-info">
                 <div class="row">
                     <span class="label">Order ID</span>
-                    <span class="value">#<?php echo $delivery['order_id']; ?></span>
+                    <span class="value"> <?php echo $delivery['order_id']; ?></span>
                 </div>
                 <div class="row">
                     <span class="label">Business</span>

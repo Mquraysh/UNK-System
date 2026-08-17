@@ -319,14 +319,6 @@ include '../includes/header.php';
                     </div>
                 </div>
 
-                <div class="checkbox-group">
-                    <label>
-                        <input type="checkbox" name="remember" value="1"> Remember Me
-                    </label>
-                    <div class="forgot-link">
-                        <a href="forgot-password.php"><i class="fas fa-question-circle"></i> Forgot Password?</a>
-                    </div>
-                </div>
 
                 <button type="submit" class="btn"><i class="fas fa-sign-in-alt"></i> Login</button>
             </form>

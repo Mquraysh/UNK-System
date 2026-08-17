@@ -35,7 +35,7 @@ $sql = "SELECT
     o.order_id, 
     o.grand_total, 
     o.delivery_address, 
-    o.contact_phone, 
+    u.phone, 
     o.order_date, 
     o.special_instructions,
     o.status as order_status,
@@ -53,7 +53,7 @@ $sql = "SELECT
     a.last_name as agent_last_name, 
     a.vehicle_type, 
     a.vehicle_registration, 
-    a.phone as agent_phone,
+    u.phone as agent_phone,
     a.license_number,
     (SELECT COUNT(*) FROM deliveries WHERE agent_id = a.agent_id AND status = 'delivered') as agent_total_deliveries,
     (SELECT AVG(rating) FROM delivery_ratings WHERE delivery_id IN (SELECT delivery_id FROM deliveries WHERE agent_id = a.agent_id)) as agent_avg_rating
@@ -505,9 +505,9 @@ include '../includes/business_sidebar.php';
         </div>
         <div class="header-actions">
             <?php if ($delivery['status'] != 'delivered' && $delivery['status'] != 'cancelled'): ?>
-                <a href="update-status.php?id=<?php echo $delivery_id; ?>" class="btn btn-primary">
+                <!-- <a href="../update-status.php?id=<?php echo $delivery_id; ?>" class="btn btn-primary">
                     <i class="fas fa-edit"></i> Update Status
-                </a>
+                </a> -->
             <?php endif; ?>
             <?php if (!$delivery['agent_id'] && $delivery['status'] != 'cancelled' && $delivery['status'] != 'delivered'): ?>
                 <a href="assign-agent.php?id=<?php echo $delivery_id; ?>" class="btn btn-success">

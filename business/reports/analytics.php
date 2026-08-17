@@ -437,6 +437,9 @@ include '../includes/business_sidebar.php';
         <a href="index.php" class="btn btn-secondary">
             <i class="fas fa-arrow-left"></i> Back to Reports
         </a>
+        <!-- <a href="export_stock.php?start_date=<?php echo $start_date; ?>&end_date=<?php echo $end_date; ?>" class="btn-export">
+                    <i class="fas fa-file-export"></i> Export
+        </a> -->
     </div>
 
     <!-- KPI Cards -->

@@ -1,8 +1,9 @@
 <?php
-// delivery/track/track-delivery.php - COMPLETE DELIVERY TRACKING SYSTEM
+// delivery/track/track-delivery.php - Tracking Only (No Status Update)
 require_once '../../config/database.php';
 session_start();
 
+// Check if user is logged in as delivery agent
 if (!isset($_SESSION['user_id']) || $_SESSION['role'] != 'delivery') {
     header("Location: ../login.php");
     exit();
@@ -11,12 +12,13 @@ if (!isset($_SESSION['user_id']) || $_SESSION['role'] != 'delivery') {
 $user_id = $_SESSION['user_id'];
 $delivery_id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
 
+// Redirect if no delivery ID provided
 if ($delivery_id <= 0) {
     header("Location: ../my-deliveries/my-deliveries.php");
     exit();
 }
 
-// Get agent info
+// Get delivery agent information
 $agent_sql = "SELECT agent_id, first_name, last_name, phone, vehicle_type, vehicle_registration 
               FROM delivery_agents WHERE user_id = '$user_id'";
 $agent_result = mysqli_query($conn, $agent_sql);
@@ -29,9 +31,7 @@ if (!$agent) {
 
 $agent_id = $agent['agent_id'];
 
-// ============================================
-// GET DELIVERY DETAILS
-// ============================================
+// Get delivery details with join to orders, customers, users, businesses
 $sql = "SELECT 
             d.delivery_id,
             d.order_id,
@@ -41,10 +41,6 @@ $sql = "SELECT
             d.created_at,
             d.pickup_address,
             d.delivery_address,
-            b.latitude,
-            b.longitude,
-            c.delivery_latitude,
-            c.delivery_longitude,
             d.assigned_at,
             d.picked_up_at,
             d.estimated_distance,
@@ -54,6 +50,7 @@ $sql = "SELECT
             d.rated_at,
             o.delivery_address as order_delivery_address,
             o.order_date,
+            o.status as order_status,
             c.first_name as customer_first_name,
             c.last_name as customer_last_name,
             c.city,
@@ -63,7 +60,9 @@ $sql = "SELECT
             b.location as business_address,
             b.phone as business_phone,
             b.latitude as business_latitude,
-            b.longitude as business_longitude
+            b.longitude as business_longitude,
+            c.delivery_latitude as customer_latitude,
+            c.delivery_longitude as customer_longitude
         FROM deliveries d
         JOIN orders o ON d.order_id = o.order_id
         JOIN customers c ON o.customer_id = c.customer_id
@@ -75,36 +74,38 @@ $sql = "SELECT
 $result = mysqli_query($conn, $sql);
 $delivery = mysqli_fetch_assoc($result);
 
+// Redirect if delivery not found or not assigned to this agent
 if (!$delivery) {
     header("Location: ../my-deliveries/my-deliveries.php");
     exit();
 }
 
 // ============================================
-// FIX: SET ADDRESS FROM BUSINESS AND CUSTOMER
+// SEQUENTIAL STATUS ORDER
 // ============================================
-if (empty($delivery['pickup_address'])) {
-    $delivery['pickup_address'] = $delivery['business_address'] ?? 'Business Location';
+$status_order = ['assigned', 'picked_up', 'in_transit', 'nearby', 'delivered'];
+$current_status = $delivery['status'];
+$current_index = array_search($current_status, $status_order);
+
+// Get next statuses
+$next_statuses = [];
+if ($current_index !== false && $current_index < count($status_order) - 1) {
+    $next_statuses = array_slice($status_order, $current_index + 1);
 }
 
-if (empty($delivery['delivery_address'])) {
-    $delivery['delivery_address'] = $delivery['customer_saved_address'] ?? $delivery['order_delivery_address'] ?? 'Customer Address';
-}
-
-if (empty($delivery['business_latitude']) && !empty($delivery['pickup_latitude'])) {
-    $delivery['business_latitude'] = $delivery['pickup_latitude'];
-    $delivery['business_longitude'] = $delivery['pickup_longitude'];
-}
-
-// Default Dar es Salaam coordinates
+// Default coordinates for Dar es Salaam
 $default_lat = -6.7924;
 $default_lng = 39.2083;
 
-// ============================================
-// GET LATEST LOCATION FROM delivery_tracking
-// ============================================
-$current_lat = $delivery['pickup_latitude'] ?? $default_lat;
-$current_lng = $delivery['pickup_longitude'] ?? $default_lng;
+// Get pickup and delivery coordinates
+$pickup_lat = $delivery['business_latitude'] ?? $default_lat;
+$pickup_lng = $delivery['business_longitude'] ?? $default_lng;
+$delivery_lat = $delivery['customer_latitude'] ?? $default_lat;
+$delivery_lng = $delivery['customer_longitude'] ?? $default_lng;
+
+// Set current location to pickup initially
+$current_lat = $pickup_lat;
+$current_lng = $pickup_lng;
 
 // Check if delivery_tracking table exists
 $table_check = "SHOW TABLES LIKE 'delivery_tracking'";
@@ -117,6 +118,7 @@ if (mysqli_num_rows($table_result) > 0) {
     $has_latitude = mysqli_num_rows($col_result) > 0;
     
     if ($has_latitude) {
+        // Get latest location from tracking
         $latest_sql = "SELECT latitude, longitude, status, created_at 
                        FROM delivery_tracking 
                        WHERE delivery_id = '$delivery_id' 
@@ -126,53 +128,21 @@ if (mysqli_num_rows($table_result) > 0) {
         $latest_location = mysqli_fetch_assoc($latest_result);
         
         if ($latest_location) {
-            $current_lat = $latest_location['latitude'] ?? $current_lat;
-            $current_lng = $latest_location['longitude'] ?? $current_lng;
+            $current_lat = $latest_location['latitude'] ?? $pickup_lat;
+            $current_lng = $latest_location['longitude'] ?? $pickup_lng;
         }
     }
 }
 
 // ============================================
-// UPDATE STATUS (AJAX HANDLER)
-// ============================================
-if (isset($_POST['update_status'])) {
-    $new_status = $_POST['status'];
-    $allowed = ['assigned', 'picked_up', 'in_transit', 'nearby', 'delivered'];
-    
-    if (in_array($new_status, $allowed)) {
-        $update_sql = "UPDATE deliveries SET status = '$new_status' WHERE delivery_id = '$delivery_id'";
-        mysqli_query($conn, $update_sql);
-        
-        // Add tracking entry
-        $track_sql = "INSERT INTO delivery_tracking (delivery_id, latitude, longitude, status, created_at) 
-                      SELECT '$delivery_id', pickup_latitude, pickup_longitude, '$new_status', NOW()
-                      FROM deliveries WHERE delivery_id = '$delivery_id'";
-        mysqli_query($conn, $track_sql);
-        
-        if ($new_status == 'delivered') {
-            $order_sql = "SELECT order_id FROM deliveries WHERE delivery_id = '$delivery_id'";
-            $order_result = mysqli_query($conn, $order_sql);
-            $order = mysqli_fetch_assoc($order_result);
-            if ($order) {
-                mysqli_query($conn, "UPDATE orders SET status = 'delivered' WHERE order_id = '{$order['order_id']}'");
-            }
-        }
-        
-        echo json_encode(['success' => true, 'status' => $new_status]);
-        exit();
-    }
-}
-
-// ============================================
-// UPDATE LOCATION (AJAX HANDLER)
+// HANDLE LOCATION UPDATE ONLY (NO STATUS UPDATE)
 // ============================================
 if (isset($_POST['update_location'])) {
     $lat = (float)$_POST['lat'];
     $lng = (float)$_POST['lng'];
     $status = $_POST['status'] ?? $delivery['status'];
-    $notes = $_POST['notes'] ?? '';
     
-    // Insert into delivery_tracking
+    // Insert location into tracking
     $track_sql = "INSERT INTO delivery_tracking (delivery_id, latitude, longitude, status, created_at) 
                   VALUES ('$delivery_id', '$lat', '$lng', '$status', NOW())";
     mysqli_query($conn, $track_sql);
@@ -181,65 +151,7 @@ if (isset($_POST['update_location'])) {
     exit();
 }
 
-// ============================================
-// GET LOCATION HISTORY (AJAX)
-// ============================================
-if (isset($_GET['get_locations'])) {
-    $history_sql = "SELECT latitude, longitude, status, created_at as recorded_at 
-                    FROM delivery_tracking 
-                    WHERE delivery_id = '$delivery_id' 
-                    ORDER BY created_at ASC";
-    $history_result = mysqli_query($conn, $history_sql);
-    $updates = [];
-    while ($row = mysqli_fetch_assoc($history_result)) {
-        $updates[] = $row;
-    }
-    echo json_encode($updates);
-    exit();
-}
-
-// ============================================
-// GET PRODUCTS
-// ============================================
-$products_sql = "SELECT 
-                    oi.order_item_id,
-                    oi.product_id,
-                    oi.quantity,
-                    p.name,
-                    p.price as product_price,
-                    p.image_url
-                 FROM order_items oi
-                 JOIN products p ON oi.product_id = p.product_id
-                 WHERE oi.order_id = '{$delivery['order_id']}'";
-$products_result = mysqli_query($conn, $products_sql);
-$products = [];
-if ($products_result) {
-    while ($row = mysqli_fetch_assoc($products_result)) {
-        $products[] = $row;
-    }
-}
-
-// Calculate delivery progress
-$progress = 0;
-$status_steps = [
-    'pending' => 0,
-    'assigned' => 20,
-    'picked_up' => 40,
-    'in_transit' => 60,
-    'nearby' => 80,
-    'delivered' => 100
-];
-$progress = $status_steps[$delivery['status']] ?? 0;
-
-$status_icons = [
-    'pending' => 'fa-clock',
-    'assigned' => 'fa-user-check',
-    'picked_up' => 'fa-box-open',
-    'in_transit' => 'fa-truck',
-    'nearby' => 'fa-location-dot',
-    'delivered' => 'fa-flag-checkered'
-];
-
+// Status color mapping for UI
 $status_colors = [
     'pending' => '#f39c12',
     'assigned' => '#3498db',
@@ -249,6 +161,15 @@ $status_colors = [
     'delivered' => '#27ae60'
 ];
 
+// Status label mapping for UI
+$status_labels = [
+    'assigned' => 'Assigned to Agent',
+    'picked_up' => 'Picked Up',
+    'in_transit' => 'In Transit',
+    'nearby' => 'Nearby',
+    'delivered' => 'Delivered ✅'
+];
+
 include '../includes/delivery_sidebar.php';
 ?>
 <!DOCTYPE html>
@@ -256,67 +177,171 @@ include '../includes/delivery_sidebar.php';
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Track Delivery #<?php echo $delivery_id; ?> | UNK System</title>
+    <title>Track Delivery #<?php echo $delivery_id; ?></title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: 'Inter', sans-serif; background: #f5f7fb; color: #1f2937; }
+        body { font-family: 'Inter', sans-serif; background: #f0f2f5; color: #1f2937; }
         
         .delivery-content {
             margin-left: 280px;
-            padding: 2rem 2.5rem;
+            padding: 1.5rem 2rem;
             min-height: 100vh;
-            background: #f0f2f5;
             transition: all 0.3s;
         }
         
         @media (max-width: 1024px) {
-            .delivery-content { margin-left: 0; padding: 1.25rem; }
+            .delivery-content { margin-left: 0; padding: 1rem; }
         }
         @media (max-width: 768px) {
-            .delivery-content { padding: 0.9rem; }
+            .delivery-content { padding: 0.5rem; }
         }
         
         .page-header {
-            margin-bottom: 1.5rem;
             display: flex;
             justify-content: space-between;
             align-items: center;
             flex-wrap: wrap;
-            gap: 1rem;
+            gap: 0.8rem;
+            margin-bottom: 1rem;
+            background: white;
+            padding: 0.8rem 1.5rem;
+            border-radius: 1rem;
+            border: 1px solid #e2e8f0;
         }
         .page-header h1 {
-            font-size: 1.75rem;
-            font-weight: 800;
+            font-size: 1.3rem;
+            font-weight: 700;
             color: #0f172a;
             display: flex;
             align-items: center;
-            gap: 0.75rem;
+            gap: 0.5rem;
         }
         .page-header h1 i { color: #e67e22; }
         .page-header .delivery-id {
             background: #e67e22;
             color: white;
-            padding: 0.3rem 1rem;
+            padding: 0.2rem 0.8rem;
             border-radius: 2rem;
-            font-size: 0.8rem;
+            font-size: 0.7rem;
             font-weight: 600;
         }
         .page-header .status-badge {
-            padding: 0.3rem 1rem;
+            padding: 0.2rem 0.8rem;
             border-radius: 2rem;
-            font-size: 0.8rem;
+            font-size: 0.7rem;
             font-weight: 600;
             color: white;
             background: <?php echo $status_colors[$delivery['status']] ?? '#64748b'; ?>;
         }
+        .page-header .btn-back {
+            background: #64748b;
+            color: white;
+            padding: 0.4rem 0.8rem;
+            border-radius: 2rem;
+            text-decoration: none;
+            font-size: 0.7rem;
+            font-weight: 600;
+            transition: 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+        }
+        .page-header .btn-back:hover { background: #475569; transform: translateY(-2px); }
         
-        .tracking-grid {
-            display: grid;
-            grid-template-columns: 2fr 1fr;
-            gap: 1.5rem;
+        .page-header .btn-update-status {
+            background: #e67e22;
+            color: white;
+            padding: 0.4rem 1rem;
+            border-radius: 2rem;
+            text-decoration: none;
+            font-size: 0.7rem;
+            font-weight: 600;
+            transition: 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+        }
+        .page-header .btn-update-status:hover { background: #d35400; transform: translateY(-2px); }
+        
+        /* Progress Steps */
+        .progress-container {
+            background: white;
+            border-radius: 1.25rem;
+            padding: 1.5rem 2rem;
+            margin-bottom: 1rem;
+            border: 1px solid #e2e8f0;
+        }
+        .progress-steps {
+            display: flex;
+            justify-content: space-between;
+            position: relative;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .progress-steps::before {
+            content: '';
+            position: absolute;
+            top: 18px;
+            left: 30px;
+            right: 30px;
+            height: 3px;
+            background: #e2e8f0;
+            z-index: 0;
+        }
+        .step {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            position: relative;
+            z-index: 1;
+            flex: 1;
+        }
+        .step-circle {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 12px;
+            background: #e2e8f0;
+            color: #94a3b8;
+            border: 3px solid #e2e8f0;
+            transition: all 0.3s;
+        }
+        .step.active .step-circle {
+            background: #e67e22;
+            color: white;
+            border-color: #e67e22;
+            box-shadow: 0 4px 12px rgba(230,126,34,0.3);
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+        .step.completed .step-circle {
+            background: #27ae60;
+            color: white;
+            border-color: #27ae60;
+        }
+        .step-label {
+            font-size: 10px;
+            margin-top: 6px;
+            color: #94a3b8;
+            font-weight: 500;
+            text-align: center;
+        }
+        .step.active .step-label {
+            color: #e67e22;
+            font-weight: 700;
+        }
+        .step.completed .step-label {
+            color: #27ae60;
         }
         
         .map-container {
@@ -324,215 +349,65 @@ include '../includes/delivery_sidebar.php';
             border-radius: 1.25rem;
             overflow: hidden;
             border: 1px solid #e2e8f0;
-            min-height: 500px;
             position: relative;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.05);
         }
         .map-container #map {
             width: 100%;
-            height: 500px;
+            height: 70vh;
+            min-height: 500px;
             border: none;
-            background: #f0f2f5;
+            background: #e8ecf1;
         }
         
-        .side-panel {
-            display: flex;
-            flex-direction: column;
-            gap: 1rem;
-        }
-        
-        .info-card {
-            background: white;
-            border-radius: 1.25rem;
-            padding: 1.25rem;
-            border: 1px solid #e2e8f0;
-        }
-        .info-card h3 {
-            font-size: 0.85rem;
-            font-weight: 700;
-            color: #0f172a;
-            margin-bottom: 0.75rem;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }
-        .info-card h3 i { color: #e67e22; }
-        
-        .info-row {
-            display: flex;
-            justify-content: space-between;
-            padding: 0.4rem 0;
-            font-size: 0.8rem;
-            border-bottom: 1px solid #f1f5f9;
-        }
-        .info-row .label { color: #64748b; }
-        .info-row .value { font-weight: 600; color: #0f172a; }
-        .info-row:last-child { border-bottom: none; }
-        
-        .progress-container {
-            margin: 1rem 0;
-        }
-        .progress-bar {
-            width: 100%;
-            height: 8px;
-            background: #e2e8f0;
-            border-radius: 4px;
-            overflow: hidden;
-            position: relative;
-        }
-        .progress-bar .fill {
-            height: 100%;
-            background: linear-gradient(90deg, #e67e22, #f39c12);
-            border-radius: 4px;
-            transition: width 1s ease;
-            width: <?php echo $progress; ?>%;
-        }
-        .progress-label {
-            display: flex;
-            justify-content: space-between;
-            font-size: 0.65rem;
-            color: #64748b;
-            margin-top: 0.3rem;
-        }
-        
-        .timeline {
-            position: relative;
-            padding-left: 2rem;
-        }
-        .timeline::before {
-            content: '';
+        .map-controls {
             position: absolute;
-            left: 8px;
-            top: 0;
-            bottom: 0;
-            width: 2px;
-            background: #e2e8f0;
-        }
-        .timeline-item {
-            position: relative;
-            padding: 0.5rem 0;
-            padding-left: 1.5rem;
-        }
-        .timeline-item::before {
-            content: '';
-            position: absolute;
-            left: -1.5rem;
-            top: 0.7rem;
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            background: #e2e8f0;
-            border: 2px solid white;
-            box-shadow: 0 0 0 2px #e2e8f0;
-        }
-        .timeline-item.active::before {
-            background: #e67e22;
-            box-shadow: 0 0 0 3px rgba(230,126,34,0.3);
-        }
-        .timeline-item.completed::before {
-            background: #27ae60;
-            box-shadow: 0 0 0 2px #27ae60;
-        }
-        .timeline-item .time {
-            font-size: 0.6rem;
-            color: #94a3b8;
-        }
-        .timeline-item .title {
-            font-size: 0.8rem;
-            font-weight: 600;
-        }
-        
-        .btn {
-            padding: 0.5rem 1rem;
-            border-radius: 0.5rem;
-            border: none;
-            font-weight: 600;
-            cursor: pointer;
-            text-decoration: none;
-            display: inline-flex;
-            align-items: center;
-            gap: 0.5rem;
-            font-size: 0.8rem;
-            transition: all 0.3s;
-        }
-        .btn-primary { background: #e67e22; color: white; }
-        .btn-primary:hover { background: #d35400; transform: translateY(-2px); }
-        .btn-outline { background: transparent; border: 2px solid #e2e8f0; color: #64748b; }
-        .btn-outline:hover { border-color: #e67e22; color: #e67e22; transform: translateY(-2px); }
-        
-        .products-list {
-            margin-top: 0.5rem;
-        }
-        .product-item {
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
             display: flex;
-            align-items: center;
-            gap: 0.75rem;
-            padding: 0.5rem 0;
-            border-bottom: 1px solid #f1f5f9;
-        }
-        .product-item:last-child {
-            border-bottom: none;
-        }
-        .product-item img {
-            width: 45px;
-            height: 45px;
-            object-fit: cover;
-            border-radius: 0.5rem;
-            border: 1px solid #e2e8f0;
-            flex-shrink: 0;
-        }
-        .product-item .name {
-            font-size: 0.8rem;
-            font-weight: 500;
-            color: #0f172a;
-        }
-        .product-item .qty {
-            font-size: 0.7rem;
-            color: #64748b;
-        }
-        
-        .status-select {
-            padding: 0.3rem 0.6rem;
-            border-radius: 0.4rem;
-            border: 1px solid #e2e8f0;
-            background: white;
-            font-size: 0.7rem;
-            cursor: pointer;
-            flex: 1;
-            min-width: 120px;
-        }
-        .status-select:focus { outline: none; border-color: #e67e22; }
-        
-        .live-btn {
-            background: #e74c3c;
-            color: white;
-            border: none;
+            gap: 10px;
+            z-index: 1000;
+            background: rgba(255,255,255,0.95);
             padding: 0.6rem 1.2rem;
-            border-radius: 0.5rem;
+            border-radius: 2rem;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.2);
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        .map-controls .btn {
+            padding: 0.3rem 0.8rem;
+            border-radius: 2rem;
+            border: none;
             font-weight: 600;
-            font-size: 0.85rem;
+            font-size: 0.7rem;
             cursor: pointer;
+            transition: 0.2s;
             display: inline-flex;
             align-items: center;
-            gap: 0.5rem;
-            animation: pulse 2s infinite;
+            gap: 0.3rem;
         }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.6; }
-        }
-        .live-btn:hover { background: #c0392b; }
+        .map-controls .btn-primary { background: #e67e22; color: white; }
+        .map-controls .btn-primary:hover { background: #d35400; transform: scale(1.05); }
+        .map-controls .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+        .map-controls .btn-danger { background: #e74c3c; color: white; }
+        .map-controls .btn-danger:hover { background: #c0392b; transform: scale(1.05); }
+        .map-controls .btn-outline { background: transparent; border: 1px solid #e2e8f0; color: #64748b; }
+        .map-controls .btn-outline:hover { border-color: #e67e22; color: #e67e22; }
         
         .live-indicator {
-            display: inline-flex;
+            display: <?php echo ($delivery['status'] != 'delivered' && $delivery['status'] != 'failed') ? 'flex' : 'none'; ?>;
             align-items: center;
-            gap: 0.4rem;
-            font-size: 0.7rem;
+            gap: 0.3rem;
+            font-size: 0.65rem;
             color: #27ae60;
             font-weight: 600;
         }
         .live-indicator .dot {
-            width: 8px;
-            height: 8px;
+            width: 6px;
+            height: 6px;
             background: #27ae60;
             border-radius: 50%;
             animation: blink 1.5s infinite;
@@ -542,374 +417,269 @@ include '../includes/delivery_sidebar.php';
             50% { opacity: 0.2; }
         }
         
-        .custom-marker {
-            font-size: 28px;
-            text-align: center;
-            text-shadow: 0 2px 4px rgba(0,0,0,0.2);
-            line-height: 40px;
-        }
-        
-        .order-total {
-            border-top: 2px solid #e2e8f0;
-            padding-top: 0.75rem;
-            margin-top: 0.5rem;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            font-weight: 700;
-            font-size: 0.95rem;
-        }
-        .order-total .label { color: #0f172a; }
-        .order-total .amount { color: #e67e22; font-size: 1.1rem; }
-        
         .gps-status {
             display: flex;
             align-items: center;
-            gap: 0.5rem;
-            font-size: 0.7rem;
-            padding: 0.3rem 0.6rem;
-            border-radius: 0.5rem;
-            background: #f8fafc;
-            border: 1px solid #e2e8f0;
+            gap: 0.3rem;
+            font-size: 0.6rem;
+            color: #64748b;
         }
         .gps-status .dot-green {
-            width: 8px;
-            height: 8px;
+            width: 6px;
+            height: 6px;
             border-radius: 50%;
             background: #27ae60;
             display: inline-block;
             animation: blink 1.5s infinite;
         }
         .gps-status .dot-red {
-            width: 8px;
-            height: 8px;
+            width: 6px;
+            height: 6px;
             border-radius: 50%;
             background: #e74c3c;
             display: inline-block;
         }
         
-        @media (max-width: 1024px) {
-            .tracking-grid { grid-template-columns: 1fr; }
-            .map-container #map { height: 350px; }
-            .map-container { min-height: 350px; }
+        .custom-marker { font-size: 28px; text-align: center; text-shadow: 0 2px 8px rgba(0,0,0,0.3); line-height: 36px; }
+        .leaflet-popup-content { font-family: 'Inter', sans-serif; }
+        
+        #statusMessage {
+            font-size: 0.7rem;
+            margin-top: 0.3rem;
+            text-align: center;
         }
+        .status-message-success { color: #27ae60; }
+        .status-message-error { color: #e74c3c; }
+        .status-message-info { color: #e67e22; }
+        
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 12px;
+            background: white;
+            padding: 1rem 1.5rem;
+            border-radius: 1rem;
+            border: 1px solid #e2e8f0;
+            margin-bottom: 1rem;
+        }
+        .info-item { display: flex; flex-direction: column; }
+        .info-label { font-size: 10px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
+        .info-value { font-size: 14px; font-weight: 600; color: #0f172a; }
+        
         @media (max-width: 768px) {
-            .map-container #map { height: 280px; }
-            .map-container { min-height: 280px; }
+            .progress-container { padding: 1rem; }
+            .progress-steps { flex-wrap: wrap; gap: 8px; }
+            .step { flex: 1; min-width: 40px; }
+            .step-label { font-size: 8px; }
+            .map-container #map { height: 55vh; min-height: 350px; }
+            .map-controls { bottom: 10px; padding: 0.4rem 0.8rem; width: 95%; border-radius: 1rem; gap: 0.4rem; }
+            .map-controls .btn { font-size: 0.6rem; padding: 0.2rem 0.6rem; }
+            .page-header { flex-direction: column; align-items: flex-start; }
+            .page-header .header-right { width: 100%; flex-wrap: wrap; }
+            .info-grid { grid-template-columns: 1fr 1fr; }
+        }
+        @media (max-width: 480px) {
+            .map-container #map { height: 45vh; min-height: 280px; }
+            .delivery-content { padding: 0.3rem; }
+            .page-header { padding: 0.5rem 0.8rem; }
+            .page-header h1 { font-size: 1rem; }
+            .progress-steps::before { left: 10px; right: 10px; }
+            .info-grid { grid-template-columns: 1fr; }
         }
     </style>
 </head>
 <body>
 <div class="delivery-content">
-    <!-- Page Header -->
     <div class="page-header">
         <div>
             <h1>
                 <i class="fas fa-map-location-dot"></i>
                 Track Delivery
-                <span class="delivery-id">#<?php echo $delivery_id; ?></span>
+                <span class="delivery-id"><?php echo $delivery_id; ?></span>
             </h1>
         </div>
-        <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
-            <span class="live-indicator" id="liveIndicator" style="display: <?php echo ($delivery['status'] != 'delivered' && $delivery['status'] != 'failed') ? 'inline-flex' : 'none'; ?>;">
-                <span class="dot"></span> Live Tracking
+        <div class="header-right" style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+            <span class="live-indicator" id="liveIndicator">
+                <span class="dot"></span> Live
             </span>
             <span class="gps-status" id="gpsStatus">
                 <span class="dot-red" id="gpsDot"></span>
                 <span id="gpsText">GPS: Off</span>
             </span>
             <span class="status-badge" style="background: <?php echo $status_colors[$delivery['status']] ?? '#64748b'; ?>;">
-                <i class="fas <?php echo $status_icons[$delivery['status']] ?? 'fa-circle'; ?>"></i>
-                <?php echo str_replace('_', ' ', ucfirst($delivery['status'])); ?>
+                <i class="fas fa-circle" style="font-size: 0.4rem;"></i>
+                <?php echo $status_labels[$delivery['status']] ?? ucfirst($delivery['status']); ?>
             </span>
-            <a href="../my-deliveries/my-deliveries.php" class="btn btn-outline">
+            <!-- Button to go to update status page -->
+            <a href="../update_status/update_status.php?id=<?php echo $delivery_id; ?>" class="btn-update-status">
+                <i class="fas fa-edit"></i> Update Status
+            </a>
+            <a href="../my-deliveries/my-deliveries.php" class="btn-back">
                 <i class="fas fa-arrow-left"></i> Back
             </a>
         </div>
     </div>
 
-    <!-- Tracking Grid -->
-    <div class="tracking-grid">
-        <!-- Map Section -->
-        <div class="map-container">
-            <div id="map"></div>
+    <!-- Delivery Info -->
+    <!-- <div class="info-grid">
+        <div class="info-item">
+            <span class="info-label">Order ID</span>
+            <span class="info-value"> <?php echo $delivery['order_id']; ?></span>
         </div>
+        <div class="info-item">
+            <span class="info-label">Business</span>
+            <span class="info-value"><?php echo htmlspecialchars($delivery['business_name']); ?></span>
+        </div>
+        <div class="info-item">
+            <span class="info-label">Customer</span>
+            <span class="info-value"><?php echo htmlspecialchars($delivery['customer_first_name'] . ' ' . $delivery['customer_last_name']); ?></span>
+        </div>
+        <div class="info-item">
+            <span class="info-label">Delivery Fee</span>
+            <span class="info-value">TSh <?php echo number_format($delivery['delivery_fee'] ?? 0); ?></span>
+        </div>
+    </div> -->
 
-        <!-- Side Panel -->
-        <div class="side-panel">
-            <!-- Progress Card -->
-            <div class="info-card">
-                <h3><i class="fas fa-chart-line"></i> Delivery Progress</h3>
-                <div class="progress-container">
-                    <div class="progress-bar">
-                        <div class="fill" id="progressFill" style="width: <?php echo $progress; ?>%;"></div>
-                    </div>
-                    <div class="progress-label">
-                        <span>Order Placed</span>
-                        <span><?php echo $progress; ?>%</span>
-                        <span>Delivered</span>
-                    </div>
-                </div>
-                <div style="margin-top: 0.5rem; text-align: center; font-size: 0.7rem; color: #64748b;">
-                    <i class="fas fa-clock"></i> 
-                    Status: <?php echo str_replace('_', ' ', ucfirst($delivery['status'])); ?>
-                    <?php if ($delivery['estimated_distance']): ?>
-                        | <i class="fas fa-road"></i> <?php echo $delivery['estimated_distance']; ?> km
-                    <?php endif; ?>
-                </div>
-                <?php if ($delivery['status'] != 'delivered' && $delivery['status'] != 'failed'): ?>
-                <div style="margin-top: 0.75rem; text-align: center;">
-                    <button class="live-btn" id="startTrackingBtn" onclick="startLiveTracking()">
-                        <i class="fas fa-location-dot"></i> Start Live Tracking
-                    </button>
-                    <div style="font-size: 0.6rem; color: #94a3b8; margin-top: 0.3rem;">
-                        <i class="fas fa-info-circle"></i> Enable GPS for real-time tracking
-                    </div>
-                </div>
-                <?php endif; ?>
+    <!-- Progress Steps -->
+    <div class="progress-container">
+        <div class="progress-steps">
+            <?php 
+            $steps = ['assigned', 'picked_up', 'in_transit', 'nearby', 'delivered'];
+            $current_idx = array_search($current_status, $steps);
+            foreach ($steps as $idx => $step):
+                $status_class = '';
+                if ($idx < $current_idx) $status_class = 'completed';
+                elseif ($idx == $current_idx) $status_class = 'active';
+                
+                $label = str_replace('_', ' ', ucfirst($step));
+                $icon = '';
+                if ($step == 'assigned') $icon = 'fa-clipboard-list';
+                elseif ($step == 'picked_up') $icon = 'fa-box';
+                elseif ($step == 'in_transit') $icon = 'fa-truck';
+                elseif ($step == 'nearby') $icon = 'fa-location-dot';
+                elseif ($step == 'delivered') $icon = 'fa-check-circle';
+            ?>
+            <div class="step <?php echo $status_class; ?>">
+                <div class="step-circle"><i class="fas <?php echo $icon; ?>"></i></div>
+                <span class="step-label"><?php echo $label; ?></span>
             </div>
-
-            <!-- Delivery Details -->
-            <div class="info-card">
-                <h3><i class="fas fa-info-circle"></i> Delivery Details</h3>
-                <div class="info-row">
-                    <span class="label">Order ID</span>
-                    <span class="value">#<?php echo $delivery['order_id']; ?></span>
-                </div>
-                <div class="info-row">
-                    <span class="label">Business</span>
-                    <span class="value"><?php echo htmlspecialchars($delivery['business_name']); ?></span>
-                </div>
-                <div class="info-row">
-                    <span class="label">Customer</span>
-                    <span class="value"><?php echo htmlspecialchars($delivery['customer_first_name'] . ' ' . $delivery['customer_last_name']); ?></span>
-                </div>
-                <div class="info-row">
-                    <span class="label">Delivery Fee</span>
-                    <span class="value" style="color: #e67e22;">TSh <?php echo number_format($delivery['delivery_fee'], 0, '.', ','); ?></span>
-                </div>
-                <div class="info-row">
-                    <span class="label">Phone</span>
-                    <span class="value"><?php echo htmlspecialchars($delivery['customer_phone'] ?? $delivery['contact_phone']); ?></span>
-                </div>
-                <div class="info-row">
-                    <span class="label">Pickup Address</span>
-                    <span class="value" style="font-size: 0.75rem;"><?php echo htmlspecialchars($delivery['pickup_address']); ?></span>
-                </div>
-                <div class="info-row">
-                    <span class="label">Delivery Address</span>
-                    <span class="value" style="font-size: 0.75rem;"><?php echo htmlspecialchars($delivery['delivery_address']); ?></span>
-                </div>
-            </div>
-
-            <!-- Products Card -->
-            <div class="info-card">
-                <h3>
-                    <i class="fas fa-shopping-bag"></i> 
-                    Products 
-                    <span style="font-size: 0.7rem; font-weight: 400; color: #94a3b8;">
-                        (<?php echo count($products); ?> items)
-                    </span>
-                </h3>
-                <div class="products-list">
-                    <?php if (empty($products)): ?>
-                        <div style="text-align: center; color: #94a3b8; padding: 1rem; font-size: 0.8rem;">
-                            <i class="fas fa-box-open" style="font-size: 1.5rem; display: block; margin-bottom: 0.5rem;"></i>
-                            No products in this order
-                        </div>
-                    <?php else: ?>
-                        <?php 
-                        $total_price = 0;
-                        foreach ($products as $product): 
-                            $price = $product['product_price'] ?? 0;
-                            $subtotal = $price * $product['quantity'];
-                            $total_price += $subtotal;
-                            $img_path = '../../assets/images/default-product.jpg';
-                            if (!empty($product['image_url'])) {
-                                $full_path = '../../' . $product['image_url'];
-                                if (file_exists($full_path)) {
-                                    $img_path = $full_path;
-                                }
-                            }
-                        ?>
-                        <div class="product-item">
-                            <img src="<?php echo $img_path; ?>" 
-                                 alt="<?php echo htmlspecialchars($product['name']); ?>" 
-                                 onerror="this.src='../../assets/images/default-product.jpg'">
-                            <div style="flex: 1; min-width: 0;">
-                                <div class="name" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
-                                    <?php echo htmlspecialchars($product['name']); ?>
-                                </div>
-                                <div class="qty">
-                                    <span style="font-weight: 500;"><?php echo $product['quantity']; ?> ×</span>
-                                    <span style="color: #e67e22; font-weight: 600;">
-                                        TSh <?php echo number_format($price, 0, '.', ','); ?>
-                                    </span>
-                                </div>
-                            </div>
-                            <div style="font-weight: 700; color: #0f172a; min-width: 100px; text-align: right; font-size: 0.85rem;">
-                                TSh <?php echo number_format($subtotal, 0, '.', ','); ?>
-                            </div>
-                        </div>
-                        <?php endforeach; ?>
-                        
-                        <div class="order-total">
-                            <span class="label">Order Total</span>
-                            <span class="amount">TSh <?php echo number_format($total_price, 0, '.', ','); ?></span>
-                        </div>
-                    <?php endif; ?>
-                </div>
-            </div>
-
-            <!-- Update Status -->
-            <?php if ($delivery['status'] != 'delivered' && $delivery['status'] != 'failed'): ?>
-            <div class="info-card">
-                <h3><i class="fas fa-sync-alt"></i> Update Status</h3>
-                <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
-                    <select class="status-select" id="statusSelect">
-                        <option value="">Select Status</option>
-                        <option value="assigned" <?php echo $delivery['status'] == 'assigned' ? 'selected' : ''; ?>>Assigned</option>
-                        <option value="picked_up" <?php echo $delivery['status'] == 'picked_up' ? 'selected' : ''; ?>>Picked Up</option>
-                        <option value="in_transit" <?php echo $delivery['status'] == 'in_transit' ? 'selected' : ''; ?>>In Transit</option>
-                        <option value="nearby" <?php echo $delivery['status'] == 'nearby' ? 'selected' : ''; ?>>Nearby</option>
-                        <option value="delivered">Delivered</option>
-                    </select>
-                    <button class="btn btn-primary" onclick="updateStatus()">
-                        <i class="fas fa-check"></i> Update
-                    </button>
-                </div>
-                <div id="statusMessage" style="margin-top: 0.5rem; font-size: 0.75rem;"></div>
-            </div>
+            <?php endforeach; ?>
+        </div>
+        <div style="text-align: center; margin-top: 10px; font-size: 12px; color: #64748b;">
+            <?php if (!empty($next_statuses)): ?>
+                <i class="fas fa-info-circle"></i> 
+                Next: <strong><?php echo ucfirst(str_replace('_', ' ', $next_statuses[0])); ?></strong>
+                <span style="margin-left: 10px; font-size: 11px;">
+                    <a href="../update_status/update_status.php?id=<?php echo $delivery_id; ?>" style="color: #e67e22; text-decoration: none;">
+                        <i class="fas fa-edit"></i> Update now
+                    </a>
+                </span>
+            <?php else: ?>
+                <i class="fas fa-check-circle" style="color: #27ae60;"></i> 
+                <strong style="color: #27ae60;">All steps completed!</strong>
             <?php endif; ?>
+        </div>
+    </div>
 
-            <!-- Status Timeline -->
-            <div class="info-card">
-                <h3><i class="fas fa-history"></i> Status Timeline</h3>
-                <div class="timeline">
-                    <?php
-                    $statuses = ['assigned', 'picked_up', 'in_transit', 'nearby', 'delivered'];
-                    $status_labels = [
-                        'assigned' => 'Assigned to Delivery Agent',
-                        'picked_up' => 'Picked Up from Shop',
-                        'in_transit' => 'In Transit',
-                        'nearby' => 'Nearby Customer Location',
-                        'delivered' => 'Delivered Successfully'
-                    ];
-                    $status_icons_timeline = [
-                        'assigned' => 'fa-user-check',
-                        'picked_up' => 'fa-box-open',
-                        'in_transit' => 'fa-truck',
-                        'nearby' => 'fa-location-dot',
-                        'delivered' => 'fa-flag-checkered'
-                    ];
-                    
-                    $current_status = $delivery['status'];
-                    
-                    foreach ($statuses as $status):
-                        $is_completed = false;
-                        $is_active = ($status == $current_status);
-                        
-                        $status_index = array_search($status, $statuses);
-                        $current_index = array_search($current_status, $statuses);
-                        if ($status_index < $current_index) {
-                            $is_completed = true;
-                        }
-                    ?>
-                    <div class="timeline-item <?php echo $is_completed ? 'completed' : ''; ?> <?php echo $is_active ? 'active' : ''; ?>">
-                        <div class="title">
-                            <i class="fas <?php echo $status_icons_timeline[$status] ?? 'fa-circle'; ?>"></i>
-                            <?php echo $status_labels[$status] ?? ucfirst($status); ?>
-                        </div>
-                        <?php if ($is_completed || $is_active): ?>
-                        <div class="time">
-                            <?php echo date('d M Y h:i A'); ?>
-                        </div>
-                        <?php endif; ?>
-                    </div>
-                    <?php endforeach; ?>
-                </div>
-            </div>
+    <div class="map-container">
+        <div id="map"></div>
+        
+        <div class="map-controls">
+            <?php if ($delivery['status'] != 'delivered' && $delivery['status'] != 'failed'): ?>
+                <button class="btn btn-primary" id="startTrackingBtn" onclick="toggleTracking()">
+                    <i class="fas fa-location-dot"></i> <span id="trackingBtnText">Start Tracking</span>
+                </button>
+            <?php else: ?>
+                <span style="font-size: 0.75rem; color: #27ae60; font-weight: 600;">
+                    <i class="fas fa-check-circle"></i> Delivery Completed
+                </span>
+            <?php endif; ?>
+            <button class="btn btn-outline" onclick="fitMapToBounds()">
+                <i class="fas fa-crosshairs"></i> Center
+            </button>
         </div>
     </div>
 </div>
 
-<!-- Leaflet JavaScript -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-// ============================================
-// GLOBAL VARIABLES
-// ============================================
+// Delivery tracking data from PHP
 const deliveryId = <?php echo $delivery_id; ?>;
-const pickupLat = <?php echo $delivery['pickup_latitude'] ?? -6.7924; ?>;
-const pickupLng = <?php echo $delivery['pickup_longitude'] ?? 39.2083; ?>;
-const deliveryLat = <?php echo $delivery['delivery_latitude'] ?? -6.7924; ?>;
-const deliveryLng = <?php echo $delivery['delivery_longitude'] ?? 39.2083; ?>;
-const currentLat = <?php echo $current_lat ?? -6.7924; ?>;
-const currentLng = <?php echo $current_lng ?? 39.2083; ?>;
+const pickupLat = <?php echo $pickup_lat; ?>;
+const pickupLng = <?php echo $pickup_lng; ?>;
+const deliveryLat = <?php echo $delivery_lat; ?>;
+const deliveryLng = <?php echo $delivery_lng; ?>;
+const currentLat = <?php echo $current_lat; ?>;
+const currentLng = <?php echo $current_lng; ?>;
+const businessName = '<?php echo addslashes($delivery['business_name']); ?>';
+const customerName = '<?php echo addslashes($delivery['customer_first_name'] . ' ' . $delivery['customer_last_name']); ?>';
+const currentStatus = '<?php echo $current_status; ?>';
+const nextStatuses = <?php echo json_encode($next_statuses); ?>;
 
+// Map variables
 let map;
 let currentMarker = null;
 let routeLine = null;
 let trackingInterval = null;
 let isTracking = false;
 
-// ============================================
-// INITIALIZE MAP
-// ============================================
+// Initialize the map
 function initMap() {
     const centerLat = (pickupLat + deliveryLat) / 2;
     const centerLng = (pickupLng + deliveryLng) / 2;
 
-    map = L.map('map').setView([centerLat, centerLng], 13);
+    map = L.map('map', {
+        center: [centerLat, centerLng],
+        zoom: 14,
+        zoomControl: true,
+        attributionControl: true
+    });
 
+    // OpenStreetMap tiles
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-        maxZoom: 19
+        maxZoom: 19,
+        minZoom: 3
     }).addTo(map);
 
-    // Pickup Marker (Shop)
+    // Pickup marker
     const pickupIcon = L.divIcon({
         html: '🏪',
         className: 'custom-marker',
-        iconSize: [30, 30],
-        iconAnchor: [15, 30]
+        iconSize: [32, 32],
+        iconAnchor: [16, 32]
     });
     L.marker([pickupLat, pickupLng], { icon: pickupIcon })
         .addTo(map)
-        .bindPopup('<strong><?php echo htmlspecialchars($delivery['business_name']); ?></strong><br>📦 Pickup Location');
+        .bindPopup(`<strong>🏪 ${businessName}</strong><br><small>📦 Pickup Location</small>`);
 
-    // Delivery Marker (Customer)
+    // Delivery marker
     const deliveryIcon = L.divIcon({
         html: '🏠',
         className: 'custom-marker',
-        iconSize: [30, 30],
-        iconAnchor: [15, 30]
+        iconSize: [32, 32],
+        iconAnchor: [16, 32]
     });
     L.marker([deliveryLat, deliveryLng], { icon: deliveryIcon })
         .addTo(map)
-        .bindPopup('<strong><?php echo htmlspecialchars($delivery['customer_first_name'] . ' ' . $delivery['customer_last_name']); ?></strong><br>📍 Delivery Location');
+        .bindPopup(`<strong>🏠 ${customerName}</strong><br><small>📍 Delivery Location</small>`);
 
-    // Draw initial route
+    // Draw route line
     drawRoute(pickupLat, pickupLng, deliveryLat, deliveryLng);
 
     // Add current location marker if available
-    if (currentLat && currentLng) {
+    if (currentLat && currentLng && !isNaN(currentLat) && !isNaN(currentLng)) {
         addCurrentMarker(currentLat, currentLng);
     }
 
-    // Fit map bounds
-    const bounds = L.latLngBounds([
-        [pickupLat, pickupLng],
-        [deliveryLat, deliveryLng]
-    ]);
-    map.fitBounds(bounds, { padding: [50, 50] });
+    // Fit map to show all markers
+    fitMapToBounds();
 
+    // Add scale control
     L.control.scale({ position: 'bottomright' }).addTo(map);
 }
 
-// ============================================
-// DRAW ROUTE
-// ============================================
+// Draw route line between two points
 function drawRoute(startLat, startLng, endLat, endLng) {
     if (routeLine) {
         map.removeLayer(routeLine);
@@ -920,70 +690,102 @@ function drawRoute(startLat, startLng, endLat, endLng) {
         [endLat, endLng]
     ], {
         color: '#e67e22',
-        weight: 4,
+        weight: 5,
         opacity: 0.8,
-        dashArray: null,
-        lineJoin: 'round'
+        lineJoin: 'round',
+        dashArray: '10, 10'
     }).addTo(map);
 }
 
-// ============================================
-// ADD CURRENT LOCATION MARKER
-// ============================================
+// Add or update current location marker
 function addCurrentMarker(lat, lng) {
     const truckIcon = L.divIcon({
         html: '🚚',
         className: 'custom-marker',
-        iconSize: [32, 32],
-        iconAnchor: [16, 16]
+        iconSize: [36, 36],
+        iconAnchor: [18, 18]
     });
     
     if (currentMarker) {
         currentMarker.setLatLng([lat, lng]);
+        currentMarker.openPopup();
     } else {
         currentMarker = L.marker([lat, lng], { icon: truckIcon })
             .addTo(map)
-            .bindPopup('📍 Current Location (Delivery Agent)')
+            .bindPopup('<strong>🚚 Delivery Agent</strong><br><small>📍 Current Location</small>')
             .openPopup();
     }
 }
 
-// ============================================
-// START LIVE TRACKING
-// ============================================
-function startLiveTracking() {
-    if (!navigator.geolocation) {
-        alert('❌ Geolocation is not supported by your browser');
-        return;
+// Fit map to show all important locations
+function fitMapToBounds() {
+    const bounds = L.latLngBounds([
+        [pickupLat, pickupLng],
+        [deliveryLat, deliveryLng]
+    ]);
+    
+    if (currentMarker) {
+        const pos = currentMarker.getLatLng();
+        bounds.extend([pos.lat, pos.lng]);
     }
+    
+    map.fitBounds(bounds, { padding: [80, 80], maxZoom: 15 });
+}
 
+// Toggle tracking on/off
+function toggleTracking() {
     if (isTracking) {
-        stopLiveTracking();
+        stopTracking();
+    } else {
+        startTracking();
+    }
+}
+
+// Start GPS tracking
+function startTracking() {
+    if (!navigator.geolocation) {
+        alert('Geolocation is not supported by your browser');
         return;
     }
 
     isTracking = true;
-    document.getElementById('startTrackingBtn').innerHTML = '<i class="fas fa-stop"></i> Stop Tracking';
-    document.getElementById('startTrackingBtn').style.background = '#e74c3c';
+    document.getElementById('trackingBtnText').textContent = 'Stop Tracking';
+    document.getElementById('startTrackingBtn').className = 'btn btn-danger';
     document.getElementById('gpsDot').className = 'dot-green';
     document.getElementById('gpsText').textContent = 'GPS: Active';
-    document.getElementById('liveIndicator').style.display = 'inline-flex';
 
+    // Get initial position
+    navigator.geolocation.getCurrentPosition(
+        function(position) {
+            const lat = position.coords.latitude;
+            const lng = position.coords.longitude;
+            if (!isNaN(lat) && !isNaN(lng)) {
+                addCurrentMarker(lat, lng);
+                drawRoute(pickupLat, pickupLng, lat, lng);
+            }
+        },
+        function(error) {
+            console.error('GPS Error:', error);
+        },
+        { enableHighAccuracy: true, timeout: 5000 }
+    );
+
+    // Start periodic tracking
     trackingInterval = setInterval(function() {
         navigator.geolocation.getCurrentPosition(
             function(position) {
                 const lat = position.coords.latitude;
                 const lng = position.coords.longitude;
-                const status = document.getElementById('statusSelect')?.value || 'in_transit';
+                const status = currentStatus || 'in_transit';
 
-                // Update marker
+                if (isNaN(lat) || isNaN(lng)) return;
+
+                // Update marker and route
                 addCurrentMarker(lat, lng);
-
-                // Update route
                 drawRoute(pickupLat, pickupLng, lat, lng);
 
-                // Send to server
-                fetch('track-delivery.php', {
+                // Send location to server
+                fetch(window.location.href, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/x-www-form-urlencoded',
@@ -993,147 +795,53 @@ function startLiveTracking() {
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
-                        updateProgress(lat, lng);
+                        document.getElementById('gpsText').textContent = 'GPS: Active ✓';
                     }
                 })
                 .catch(error => console.error('Error updating location:', error));
 
-                map.setView([lat, lng], 15);
-                document.getElementById('gpsText').textContent = 'GPS: Active';
+                // Pan map to current location
+                map.panTo([lat, lng]);
             },
             function(error) {
                 console.error('GPS Error:', error);
-                document.getElementById('gpsText').textContent = 'GPS: Error - ' + error.message;
+                document.getElementById('gpsText').textContent = 'GPS: Error';
                 document.getElementById('gpsDot').className = 'dot-red';
             },
             {
                 enableHighAccuracy: true,
                 timeout: 10000,
-                maximumAge: 0
+                maximumAge: 5000
             }
         );
-    }, 5000);
+    }, 6000);
 }
 
-// ============================================
-// STOP LIVE TRACKING
-// ============================================
-function stopLiveTracking() {
+// Stop GPS tracking
+function stopTracking() {
     if (trackingInterval) {
         clearInterval(trackingInterval);
         trackingInterval = null;
     }
     isTracking = false;
-    document.getElementById('startTrackingBtn').innerHTML = '<i class="fas fa-location-dot"></i> Start Live Tracking';
-    document.getElementById('startTrackingBtn').style.background = '#e74c3c';
+    document.getElementById('trackingBtnText').textContent = 'Start Tracking';
+    document.getElementById('startTrackingBtn').className = 'btn btn-primary';
     document.getElementById('gpsDot').className = 'dot-red';
     document.getElementById('gpsText').textContent = 'GPS: Off';
 }
 
-// ============================================
-// UPDATE PROGRESS
-// ============================================
-function updateProgress(currentLat, currentLng) {
-    const distance = calculateDistance(pickupLat, pickupLng, currentLat, currentLng);
-    const totalDistance = calculateDistance(pickupLat, pickupLng, deliveryLat, deliveryLng);
-    let progress = Math.min(100, Math.round((distance / totalDistance) * 100));
-    
-    if (<?php echo $delivery['status'] == 'delivered' ? 'true' : 'false'; ?>) {
-        progress = 100;
-    }
-    
-    document.getElementById('progressFill').style.width = progress + '%';
-}
-
-// ============================================
-// CALCULATE DISTANCE
-// ============================================
-function calculateDistance(lat1, lon1, lat2, lon2) {
-    const R = 6371;
-    const dLat = (lat2 - lat1) * Math.PI / 180;
-    const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-              Math.sin(dLon/2) * Math.sin(dLon/2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-    return R * c;
-}
-
-// ============================================
-// UPDATE STATUS
-// ============================================
-function updateStatus() {
-    const statusSelect = document.getElementById('statusSelect');
-    const status = statusSelect.value;
-    const messageDiv = document.getElementById('statusMessage');
-    
-    if (!status) {
-        messageDiv.innerHTML = '<span style="color: #e74c3c;">Please select a status</span>';
-        return;
-    }
-    
-    if (!confirm('Update status to "' + status.replace('_', ' ') + '"?')) {
-        return;
-    }
-    
-    fetch('track-delivery.php', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: 'update_status=1&status=' + status
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.success) {
-            messageDiv.innerHTML = '<span style="color: #27ae60;">✅ Status updated to: ' + status.replace('_', ' ') + '</span>';
-            setTimeout(() => location.reload(), 1000);
-        } else {
-            messageDiv.innerHTML = '<span style="color: #e74c3c;">❌ Failed to update status</span>';
-        }
-    })
-    .catch(error => {
-        console.error('Error:', error);
-        messageDiv.innerHTML = '<span style="color: #e74c3c;">❌ Error updating status</span>';
-    });
-}
-
-// ============================================
-// TOAST NOTIFICATION
-// ============================================
-function showToast(message, type = 'success') {
-    const toast = document.createElement('div');
-    toast.style.position = 'fixed';
-    toast.style.bottom = '20px';
-    toast.style.right = '20px';
-    toast.style.padding = '12px 20px';
-    toast.style.borderRadius = '8px';
-    toast.style.color = 'white';
-    toast.style.fontWeight = '600';
-    toast.style.zIndex = '9999';
-    toast.style.animation = 'slideIn 0.3s ease';
-    toast.style.background = type === 'success' ? '#27ae60' : '#e74c3c';
-    toast.textContent = message;
-    document.body.appendChild(toast);
-    
-    setTimeout(() => {
-        toast.style.opacity = '0';
-        toast.style.transition = 'opacity 0.5s ease';
-        setTimeout(() => toast.remove(), 500);
-    }, 3000);
-}
-
-// ============================================
-// AUTO START ON LOAD
-// ============================================
+// Auto-start tracking when page loads
 window.addEventListener('load', function() {
     initMap();
     
     <?php if ($delivery['status'] != 'delivered' && $delivery['status'] != 'failed'): ?>
-    setTimeout(startLiveTracking, 2000);
+    setTimeout(function() {
+        startTracking();
+    }, 3000);
     <?php endif; ?>
 });
 
+// Clean up tracking when leaving page
 window.addEventListener('beforeunload', function() {
     if (trackingInterval) {
         clearInterval(trackingInterval);
